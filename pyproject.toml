@@ -1,0 +1,117 @@
+[project]
+name = "iron-sql"
+version = "0.1.0"
+
+description = "iron_sql generates typed async PostgreSQL clients and runtime helpers from schemas and SQL queries"
+readme = "README.md"
+authors = [{ name = "Ilia Ablamonov", email = "ilia@flamefork.ru" }]
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["postgresql", "sql", "sqlc", "psycopg", "codegen", "async"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+]
+
+requires-python = ">=3.13"
+dependencies = [
+    "inflection>=0.5.1",
+    "psycopg>=3.2.12",
+    "psycopg-pool>=3.2.7",
+    "pydantic>=2.12.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/Flamefork/iron_sql"
+Repository = "https://github.com/Flamefork/iron_sql.git"
+Issues = "https://github.com/Flamefork/iron_sql/issues"
+
+[build-system]
+requires = ["uv_build>=0.9.4,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.31.7",
+    "pytest>=8.4.2",
+    "pytest-asyncio>=1.2.0",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.14.1",
+]
+
+[tool.pyright]
+typeCheckingMode = "strict"
+reportUnknownArgumentType = "none"
+reportUnknownLambdaType = "none"
+reportUnknownMemberType = "none"
+reportUnknownParameterType = "none"
+reportUnknownVariableType = "none"
+reportMissingParameterType = "none"
+reportMissingTypeArgument = "none"
+reportMissingTypeStubs = "none"
+deprecateTypingAliases = true
+reportImportCycles = true
+reportUnnecessaryTypeIgnoreComment = true
+reportUnreachable = true
+reportIgnoreCommentWithoutRule = true
+reportImplicitRelativeImport = true
+
+[tool.ruff]
+target-version = "py313"
+
+[tool.ruff.format]
+preview = true
+
+[tool.ruff.lint]
+preview = true
+select = ["ALL"]
+ignore = [
+    "ANN",
+    "COM812",
+    "CPY",
+    "D",
+    "FIX",
+    "G004",
+    "ISC001",
+    "PLC1901",
+    "PLR0911",
+    "PLR0915",
+    "PLR6301",
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    "TC006",
+    "TD",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"{*_test.py,conftest.py}" = ["A002", "PLR2004", "S", "FBT"]
+
+[tool.ruff.lint.isort]
+force-single-line = true
+
+[tool.ruff.lint.pylint]
+max-args = 10
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.pytest.ini_options]
+filterwarnings = ["error"]
+addopts = ["--no-cov-on-fail", "--cov-report=term-missing:skip-covered"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.coverage.run]
+branch = true
+omit = ["*_test.py"]
+data_file = ".coverage/db.sqlite"
+
+[tool.coverage.html]
+directory = ".coverage/htmlcov"
+
+[tool.coverage.report]
+exclude_also = ["if TYPE_CHECKING:", "@overload"]
