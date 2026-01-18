@@ -1,4 +1,4 @@
-"""iron_gql: Typed GraphQL client generator for Python."""
+"""iron_sql: Typed SQL client generator for Python."""
 
 from iron_sql.generator import generate_sql_package
 
