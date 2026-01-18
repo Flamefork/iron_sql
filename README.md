@@ -9,7 +9,7 @@ iron_sql keeps SQL close to Python call sites while giving you typed, async quer
 - Safe-by-default: helper methods enforce expected row counts instead of returning silent `None`.
 
 ## Quick start
-1. Install `iron_sql`, `psycopg`, `psycopg-pool`, `orjson`, and `pydantic`.
+1. Install `iron_sql`, `psycopg`, `psycopg-pool`, and `pydantic`.
 2. Install [`sqlc` v2](https://docs.sqlc.dev/en/latest/overview/install.html) and ensure `/usr/local/bin/sqlc` is in PATH.
 3. Add a Postgres schema dump, for example `db/adept_schema.sql`.
 4. Call `generate_sql_package(schema_path=..., package_full_name=..., dsn_import=...)` from a small script or task. The generator scans your code, runs `sqlc`, and writes a module such as `adept/db/adept.py`.
