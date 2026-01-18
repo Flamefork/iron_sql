@@ -39,9 +39,26 @@ def generate_sql_package(  # noqa: PLR0914
     application_name: str | None = None,
     to_pascal_fn=alias_generators.to_pascal,
     debug_path: Path | None = None,
-    src_path: Path,
+    src_path: Path = Path(),
     sqlc_path: Path | None = None,
 ) -> bool:
+    """Generate a typed SQL package from schema and queries.
+
+    Args:
+        schema_path: Path to the Postgres schema SQL file (relative to src_path)
+        package_full_name: Target module name (e.g., "myapp.mydatabase")
+        dsn_import: Import path to DSN string (e.g.,
+            "myapp.config:CONFIG.db_url")
+        application_name: Optional application name for connection pool
+        to_pascal_fn: Function to convert names to PascalCase (default:
+            pydantic's to_pascal)
+        debug_path: Optional path to save sqlc inputs for inspection
+        src_path: Base source path for scanning queries (default: Path())
+        sqlc_path: Optional path to sqlc binary if not in PATH
+
+    Returns:
+        True if the package was generated or modified, False otherwise
+    """
     dsn_import_package, dsn_import_path = dsn_import.split(":")
 
     package_name = package_full_name.split(".")[-1]  # noqa: PLC0207
