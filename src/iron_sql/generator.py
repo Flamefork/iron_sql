@@ -40,6 +40,7 @@ def generate_sql_package(  # noqa: PLR0914
     to_pascal_fn=alias_generators.to_pascal,
     debug_path: Path | None = None,
     src_path: Path,
+    sqlc_path: Path | None = None,
 ) -> bool:
     dsn_import_package, dsn_import_path = dsn_import.split(":")
 
@@ -58,6 +59,7 @@ def generate_sql_package(  # noqa: PLR0914
         [(q.name, q.stmt) for q in queries],
         dsn=dsn,
         debug_path=debug_path,
+        sqlc_path=sqlc_path,
     )
 
     if sqlc_res.error:

@@ -10,7 +10,7 @@ iron_sql keeps SQL close to Python call sites while giving you typed, async quer
 
 ## Quick start
 1. Install `iron_sql`, `psycopg`, `psycopg-pool`, and `pydantic`.
-2. Install [`sqlc` v2](https://docs.sqlc.dev/en/latest/overview/install.html) and ensure `/usr/local/bin/sqlc` is in PATH.
+2. Install [`sqlc` v2](https://docs.sqlc.dev/en/latest/overview/install.html) and ensure it is available in your PATH.
 3. Add a Postgres schema dump, for example `db/adept_schema.sql`.
 4. Call `generate_sql_package(schema_path=..., package_full_name=..., dsn_import=...)` from a small script or task. The generator scans your code, runs `sqlc`, and writes a module such as `adept/db/adept.py`.
 
@@ -34,4 +34,5 @@ Provide the schema file and DSN import string, then call `generate_sql_package()
 - `schema_path`: path to the schema SQL file.
 - `package_full_name`: target module, e.g. `adept.db.analytics`.
 - `dsn_import`: import path to a DSN string, e.g. `adept.config:CONFIG.analytics_db_url.value`.
+- `sqlc_path`: optional path to the sqlc binary if not in PATH (e.g., `Path("/custom/bin/sqlc")`).
 - Optional `application_name`, `debug_path`, and `to_pascal_fn` if you need naming overrides or want to keep `sqlc` inputs for inspection.
