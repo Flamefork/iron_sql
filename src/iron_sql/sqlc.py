@@ -8,11 +8,6 @@ from pathlib import Path
 
 import pydantic
 
-SQLC_QUERY_TPL = """
-    -- name: ${name} :exec
-    ${stmt};
-"""
-
 
 class CatalogReference(pydantic.BaseModel):
     catalog: str
@@ -117,12 +112,41 @@ class SQLCResult(pydantic.BaseModel):
         return list(result)
 
 
+def _resolve_sqlc_command(
+    sqlc_path: Path | None,
+    sqlc_command: list[str] | None,
+) -> list[str]:
+    if sqlc_command is not None:
+        if sqlc_path is not None:
+            msg = "sqlc_command and sqlc_path are mutually exclusive"
+            raise ValueError(msg)
+        if not sqlc_command:
+            msg = "sqlc_command must not be empty"
+            raise ValueError(msg)
+        return sqlc_command
+
+    if sqlc_path is None:
+        discovered_path = shutil.which("sqlc")
+        if discovered_path is None:
+            msg = "sqlc not found in PATH"
+            raise FileNotFoundError(msg)
+        sqlc_path = Path(discovered_path)
+    if not sqlc_path.exists():
+        msg = f"sqlc not found at {sqlc_path}"
+        raise FileNotFoundError(msg)
+
+    return [str(sqlc_path)]
+
+
 def run_sqlc(
     schema_path: Path,
     queries: list[tuple[str, str]],
     *,
     dsn: str | None,
     debug_path: Path | None = None,
+    sqlc_path: Path | None = None,
+    tempdir_path: Path | None = None,
+    sqlc_command: list[str] | None = None,
 ) -> SQLCResult:
     if not schema_path.exists():
         msg = f"Schema file not found: {schema_path}"
@@ -135,8 +159,11 @@ def run_sqlc(
         )
 
     queries = list({q[0]: q for q in queries}.values())
+    cmd_prefix = _resolve_sqlc_command(sqlc_path, sqlc_command)
 
-    with tempfile.TemporaryDirectory() as tempdir:
+    with tempfile.TemporaryDirectory(
+        dir=str(tempdir_path) if tempdir_path else None
+    ) as tempdir:
         queries_path = Path(tempdir) / "queries.sql"
         queries_path.write_text(
             "\n\n".join(
@@ -163,8 +190,10 @@ def run_sqlc(
         }
         config_path.write_text(json.dumps(sqlc_config, indent=2), encoding="utf-8")
 
+        cmd = [*cmd_prefix, "generate", "--file", str(config_path.resolve())]
+
         sqlc_run_result = subprocess.run(  # noqa: S603
-            ["/usr/local/bin/sqlc", "generate", "--file", str(config_path)],
+            cmd,
             capture_output=True,
             check=False,
         )

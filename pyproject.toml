@@ -40,6 +40,7 @@ dev = [
     "pytest-asyncio>=1.2.0",
     "pytest-cov>=7.0.0",
     "ruff>=0.14.1",
+    "testcontainers>=4",
 ]
 
 [tool.pyright]
@@ -85,10 +86,11 @@ ignore = [
     "RUF003",
     "TC006",
     "TD",
+    "TRY300",
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"{*_test.py,conftest.py}" = ["A002", "PLR2004", "S", "FBT"]
+"test_*.py" = ["A002", "PLR2004", "S", "FBT"]
 
 [tool.ruff.lint.isort]
 force-single-line = true
@@ -100,10 +102,15 @@ max-args = 10
 ban-relative-imports = "all"
 
 [tool.pytest.ini_options]
-filterwarnings = ["error"]
+testpaths = ["tests"]
+filterwarnings = [
+    "error",
+    "ignore:The @wait_container_is_ready decorator is deprecated:DeprecationWarning",
+]
 addopts = ["--no-cov-on-fail", "--cov-report=term-missing:skip-covered"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+
 
 [tool.coverage.run]
 branch = true

@@ -39,8 +39,30 @@ def generate_sql_package(  # noqa: PLR0914
     application_name: str | None = None,
     to_pascal_fn=alias_generators.to_pascal,
     debug_path: Path | None = None,
-    src_path: Path,
+    src_path: Path = Path(),
+    sqlc_path: Path | None = None,
+    tempdir_path: Path | None = None,
+    sqlc_command: list[str] | None = None,
 ) -> bool:
+    """Generate a typed SQL package from schema and queries.
+
+    Args:
+        schema_path: Path to the Postgres schema SQL file (relative to src_path)
+        package_full_name: Target module name (e.g., "myapp.mydatabase")
+        dsn_import: Import path to DSN string (e.g.,
+            "myapp.config:CONFIG.db_url")
+        application_name: Optional application name for connection pool
+        to_pascal_fn: Function to convert names to PascalCase (default:
+            pydantic's to_pascal)
+        debug_path: Optional path to save sqlc inputs for inspection
+        src_path: Base source path for scanning queries (default: Path())
+        sqlc_path: Optional path to sqlc binary if not in PATH
+        tempdir_path: Optional path for temporary file generation
+        sqlc_command: Optional command prefix to run sqlc
+
+    Returns:
+        True if the package was generated or modified, False otherwise
+    """
     dsn_import_package, dsn_import_path = dsn_import.split(":")
 
     package_name = package_full_name.split(".")[-1]  # noqa: PLC0207
@@ -58,6 +80,9 @@ def generate_sql_package(  # noqa: PLR0914
         [(q.name, q.stmt) for q in queries],
         dsn=dsn,
         debug_path=debug_path,
+        sqlc_path=sqlc_path,
+        tempdir_path=tempdir_path,
+        sqlc_command=sqlc_command,
     )
 
     if sqlc_res.error:
@@ -97,7 +122,7 @@ def generate_sql_package(  # noqa: PLR0914
         render_query_overload(sql_fn_name, q.name, q.stmt, q.row_type) for q in queries
     ]
 
-    query_cases = [render_query_case(q.name, q.stmt) for q in queries]
+    query_dict_entries = [render_query_dict_entry(q.name, q.stmt) for q in queries]
 
     new_content = render_package(
         dsn_import_package,
@@ -107,7 +132,7 @@ def generate_sql_package(  # noqa: PLR0914
         sorted(entities),
         sorted(query_classes),
         sorted(query_overloads),
-        sorted(query_cases),
+        sorted(query_dict_entries),
         application_name,
     )
     changed = write_if_changed(target_package_path, new_content + "\n")
@@ -124,7 +149,7 @@ def render_package(
     entities: list[str],
     query_classes: list[str],
     query_overloads: list[str],
-    query_cases: list[str],
+    query_dict_entries: list[str],
     application_name: str | None = None,
 ):
     return f"""
@@ -170,7 +195,7 @@ from {dsn_import_package} import {dsn_import_path.split(".", maxsplit=1)[0]}
 {package_name.upper()}_POOL = runtime.ConnectionPool(
     {dsn_import_path},
     name="{package_name}",
-    application_name="{application_name}",
+    application_name={application_name!r},
 )
 
 _{package_name}_connection = ContextVar[psycopg.AsyncConnection | None](
@@ -203,14 +228,21 @@ class Query:
 {"\n\n\n".join(query_classes)}
 
 
+_QUERIES: dict[str, type[Query]] = {{
+    {("," + chr(10) + "    ").join(query_dict_entries)},
+}}
+
+
 {"\n".join(query_overloads)}
 @overload
 def {sql_fn_name}(stmt: str) -> Query: ...
 
 
 def {sql_fn_name}(stmt: str, row_type: str | None = None) -> Query:
-    {indent_block("\n".join(query_cases), "    ")}
-    return Query()
+    if stmt in _QUERIES:
+        return _QUERIES[stmt]()
+    msg = f"Unknown statement: {{stmt!r}}"
+    raise KeyError(msg)
 
     """.strip()
 
@@ -308,11 +340,11 @@ async def query_all_rows({", ".join(query_fn_params)}) -> list[{result}]:
 
 async def query_single_row({", ".join(query_fn_params)}) -> {result}:
     async with self._execute({params_arg}) as cur:
-        return runtime.get_one_row(await cur.fetchall())
+        return runtime.get_one_row(await cur.fetchmany(2))
 
 async def query_optional_row({", ".join(query_fn_params)}) -> {base_result} | None:
     async with self._execute({params_arg}) as cur:
-        return runtime.get_one_row_or_none(await cur.fetchall())
+        return runtime.get_one_row_or_none(await cur.fetchmany(2))
 
         """.strip()
     else:
@@ -357,13 +389,8 @@ def {sql_fn_name}(stmt: Literal[{stmt!r}]{result_arg}) -> {query_name}: ...
     """.strip()
 
 
-def render_query_case(query_name: str, stmt: str) -> str:
-    return f"""
-
-if stmt == {stmt!r}:
-    return {query_name}()
-
-    """.strip()
+def render_query_dict_entry(query_name: str, stmt: str) -> str:
+    return f"{stmt!r}: {query_name}"
 
 
 @dataclass(kw_only=True)
@@ -483,7 +510,16 @@ def column_py_spec(  # noqa: C901, PLR0912
     match db_type:
         case "bool" | "boolean":
             py_type = "bool"
-        case "int2" | "int4" | "int8" | "smallint" | "integer" | "bigint":
+        case (
+            "int2"
+            | "int4"
+            | "int8"
+            | "smallint"
+            | "integer"
+            | "bigint"
+            | "serial"
+            | "bigserial"
+        ):
             py_type = "int"
         case "float4" | "float8":
             py_type = "float"
