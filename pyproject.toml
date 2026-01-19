@@ -90,7 +90,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"{*_test.py,conftest.py}" = ["A002", "PLR2004", "S", "FBT"]
+"test_*.py" = ["A002", "PLR2004", "S", "FBT"]
 
 [tool.ruff.lint.isort]
 force-single-line = true
