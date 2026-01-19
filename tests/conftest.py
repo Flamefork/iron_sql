@@ -1,19 +1,41 @@
-import asyncio
 import importlib
 import shutil
 import sys
 import textwrap
+import uuid
 from collections.abc import AsyncIterator
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from typing import LiteralString
 
 import psycopg
 import pytest
+from psycopg import sql
 from testcontainers.postgres import PostgresContainer
 
 from iron_sql import generate_sql_package
 from tests.sqlc_testcontainers import SqlcContainer
+
+# =============================================================================
+# PostgreSQL Container & Connection
+# =============================================================================
+
+
+@pytest.fixture(scope="session")
+def pg_container() -> Iterator[PostgresContainer]:
+    with PostgresContainer("postgres:17-alpine") as postgres:
+        yield postgres
+
+
+@pytest.fixture(scope="session")
+def pg_dsn(pg_container: PostgresContainer) -> str:
+    return pg_container.get_connection_url(driver=None)
+
+
+# =============================================================================
+# Schema Management
+# =============================================================================
 
 SCHEMA_SQL = """
     CREATE TYPE user_status AS ENUM ('active', 'inactive');
@@ -48,22 +70,6 @@ SCHEMA_SQL = """
 
 
 @pytest.fixture(scope="session")
-def pg_container() -> Iterator[PostgresContainer]:
-    postgres = PostgresContainer("postgres:17-alpine")
-    postgres.start()
-    try:
-        yield postgres
-    finally:
-        postgres.stop()
-
-
-@pytest.fixture(scope="session")
-def pg_dsn(pg_container: PostgresContainer) -> str:
-    url = pg_container.get_connection_url(driver="psycopg")
-    return url.replace("+psycopg", "")
-
-
-@pytest.fixture(scope="session")
 def schema_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     temp_dir = tmp_path_factory.mktemp("data")
     path = temp_dir / "schema.sql"
@@ -71,29 +77,54 @@ def schema_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return path
 
 
-def _apply_schema(dsn: str) -> None:
-    with psycopg.connect(dsn) as conn:
-        conn.autocommit = True
-        with conn.cursor() as cur:
-            cur.execute("DROP SCHEMA IF EXISTS public CASCADE")
-            cur.execute("CREATE SCHEMA public")
-            cur.execute("GRANT ALL ON SCHEMA public TO public")
-            cur.execute(SCHEMA_SQL)
-
-
-def _cleanup_data(dsn: str) -> None:
-    with psycopg.connect(dsn) as conn:
-        conn.autocommit = True
-        with conn.cursor() as cur:
-            cur.execute(
-                "TRUNCATE TABLE posts, users, json_payloads, jsonb_arrays "
-                "RESTART IDENTITY CASCADE"
-            )
-
-
 @pytest.fixture(scope="session")
-def _apply_schema_once(pg_dsn: str) -> None:  # pyright: ignore[reportUnusedFunction]
-    _apply_schema(pg_dsn)
+def pg_template_db(pg_dsn: str) -> str:
+    template_name = "iron_sql_template"
+    with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(template_name))
+        )
+        cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(template_name)))
+
+    base_dsn = pg_dsn.rsplit("/", 1)[0]
+    template_dsn = f"{base_dsn}/{template_name}"
+
+    with psycopg.connect(template_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("DROP SCHEMA IF EXISTS public CASCADE")
+        cur.execute("CREATE SCHEMA public")
+        cur.execute("GRANT ALL ON SCHEMA public TO public")
+        cur.execute(SCHEMA_SQL)
+
+    return template_name
+
+
+@pytest.fixture
+def pg_test_dsn(pg_dsn: str, pg_template_db: str) -> Iterator[str]:
+    dbname = f"t_{uuid.uuid4().hex}"
+
+    with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            sql.SQL("CREATE DATABASE {} TEMPLATE {}").format(
+                sql.Identifier(dbname), sql.Identifier(pg_template_db)
+            )
+        )
+
+    base_dsn = pg_dsn.rsplit("/", 1)[0]
+    test_dsn = f"{base_dsn}/{dbname}"
+
+    yield test_dsn
+
+    with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute(
+            sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                sql.Identifier(dbname)
+            )
+        )
+
+
+# =============================================================================
+# SQLC Code Generation
+# =============================================================================
 
 
 @pytest.fixture(scope="session")
@@ -108,12 +139,9 @@ def containerized_sqlc(
         sqlc.stop()
 
 
-async def close_generated_pools(module: Any) -> None:
-    for name in dir(module):
-        if name.endswith("_POOL"):
-            pool = getattr(module, name)
-            if hasattr(pool, "close"):
-                await pool.close()
+# =============================================================================
+# Test Project Builder
+# =============================================================================
 
 
 class ProjectBuilder:
@@ -145,6 +173,16 @@ class ProjectBuilder:
         schema_dest = self.src_path / "schema.sql"
         schema_dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(schema_src, schema_dest)
+
+    async def extend_schema(self, sql_str: LiteralString) -> None:
+        with (self.src_path / "schema.sql").open("a", encoding="utf-8") as f:
+            f.write("\n" + sql_str)
+
+        async with (
+            await psycopg.AsyncConnection.connect(self.dsn, autocommit=True) as conn,
+            conn.cursor() as cur,
+        ):
+            await cur.execute(sql_str)
 
     def set_queries_source(self, source: str) -> None:
         self.queries_source = textwrap.dedent(source)
@@ -193,6 +231,11 @@ class ProjectBuilder:
 
     def generate(self) -> Any:
         self.generate_no_import()
+
+        # Force fresh import
+        if self.pkg_name in sys.modules:
+            sys.modules.pop(self.pkg_name)
+
         mod = importlib.import_module(self.pkg_name)
         self.generated_modules.append(mod)
         return mod
@@ -202,17 +245,35 @@ class ProjectBuilder:
 async def test_project(
     tmp_path: Path,
     request: pytest.FixtureRequest,
-    pg_dsn: str,
+    pg_test_dsn: str,
     schema_path: Path,
     containerized_sqlc: SqlcContainer,
-    _apply_schema_once: None,  # noqa: PT019
 ) -> AsyncIterator[ProjectBuilder]:
     clean_name = request.node.name.replace("[", "_").replace("]", "_").replace("-", "_")
     builder = ProjectBuilder(
-        tmp_path, pg_dsn, clean_name, schema_path, containerized_sqlc
+        tmp_path, pg_test_dsn, clean_name, schema_path, containerized_sqlc
     )
+
+    # Snapshot state before test
+    before_modules = set(sys.modules)
+    before_path = list(sys.path)
+
     yield builder
-    for mod in builder.generated_modules:
-        await close_generated_pools(mod)
-        sys.modules.pop(builder.pkg_name, None)
-    await asyncio.to_thread(_cleanup_data, pg_dsn)
+
+    # Teardown
+    for module in builder.generated_modules:
+        for name in dir(module):
+            if name.endswith("_POOL"):
+                pool = getattr(module, name)
+                if hasattr(pool, "close"):
+                    await pool.close()
+
+    # Restore sys.path
+    if sys.path != before_path:
+        sys.path[:] = before_path
+
+    # Clean up sys.modules
+    new_modules = set(sys.modules) - before_modules
+    for mod_name in new_modules:
+        if mod_name.startswith("testapp_"):
+            sys.modules.pop(mod_name, None)

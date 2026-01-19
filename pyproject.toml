@@ -19,8 +19,8 @@ classifiers = [
 requires-python = ">=3.13"
 dependencies = [
     "inflection>=0.5.1",
-    "psycopg>=3.2.12",
-    "psycopg-pool>=3.2.7",
+    "psycopg>=3.3.2",
+    "psycopg-pool>=3.3.0",
     "pydantic>=2.12.4",
 ]
 
@@ -36,9 +36,11 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "basedpyright>=1.31.7",
+    "psycopg[binary]>=3.3.2",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
     "pytest-cov>=7.0.0",
+    "pytest-randomly>=4.0.1",
     "ruff>=0.14.1",
     "testcontainers>=4",
 ]
@@ -105,20 +107,19 @@ ban-relative-imports = "all"
 testpaths = ["tests"]
 filterwarnings = [
     "error",
-    "ignore:The @wait_container_is_ready decorator is deprecated:DeprecationWarning",
+    "ignore:.*wait_container_is_ready:DeprecationWarning",
 ]
 addopts = ["--no-cov-on-fail", "--cov-report=term-missing:skip-covered"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
-
 [tool.coverage.run]
 branch = true
-omit = ["*_test.py"]
+omit = ["test_*.py", "testdb.py"]
 data_file = ".coverage/db.sqlite"
 
 [tool.coverage.html]
 directory = ".coverage/htmlcov"
 
 [tool.coverage.report]
-exclude_also = ["if TYPE_CHECKING:", "@overload"]
+exclude_also = ["@overload"]

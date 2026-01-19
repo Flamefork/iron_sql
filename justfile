@@ -10,6 +10,11 @@ lint:
     uv run ruff check .
     uv run basedpyright
 
+coverage:
+    rm -rf .coverage/*
+    uv run pytest --cov --cov-report=html
+    open .coverage/htmlcov/index.html
+
 install-deps:
     uv sync
 
