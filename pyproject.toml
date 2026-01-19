@@ -40,6 +40,7 @@ dev = [
     "pytest-asyncio>=1.2.0",
     "pytest-cov>=7.0.0",
     "ruff>=0.14.1",
+    "testcontainers>=4",
 ]
 
 [tool.pyright]
@@ -100,10 +101,14 @@ max-args = 10
 ban-relative-imports = "all"
 
 [tool.pytest.ini_options]
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    "ignore:The @wait_container_is_ready decorator is deprecated:DeprecationWarning",
+]
 addopts = ["--no-cov-on-fail", "--cov-report=term-missing:skip-covered"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+
 
 [tool.coverage.run]
 branch = true
