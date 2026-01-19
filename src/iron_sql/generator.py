@@ -510,7 +510,16 @@ def column_py_spec(  # noqa: C901, PLR0912
     match db_type:
         case "bool" | "boolean":
             py_type = "bool"
-        case "int2" | "int4" | "int8" | "smallint" | "integer" | "bigint":
+        case (
+            "int2"
+            | "int4"
+            | "int8"
+            | "smallint"
+            | "integer"
+            | "bigint"
+            | "serial"
+            | "bigserial"
+        ):
             py_type = "int"
         case "float4" | "float8":
             py_type = "float"

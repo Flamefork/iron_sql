@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import shutil
 import sys
+import textwrap
 from collections.abc import AsyncIterator
 from collections.abc import Iterator
 from pathlib import Path
@@ -15,6 +16,8 @@ from iron_sql import generate_sql_package
 from tests.sqlc_testcontainers import SqlcContainer
 
 SCHEMA_SQL = """
+    CREATE TYPE user_status AS ENUM ('active', 'inactive');
+
     CREATE TABLE IF NOT EXISTS users (
         id UUID PRIMARY KEY,
         username TEXT NOT NULL,
@@ -30,6 +33,16 @@ SCHEMA_SQL = """
         title TEXT NOT NULL,
         content TEXT,
         published BOOLEAN NOT NULL DEFAULT false
+    );
+
+    CREATE TABLE IF NOT EXISTS json_payloads (
+        id SERIAL PRIMARY KEY,
+        payload JSON NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS jsonb_arrays (
+        id SERIAL PRIMARY KEY,
+        payloads JSONB[] NOT NULL
     );
 """
 
@@ -72,7 +85,10 @@ def _cleanup_data(dsn: str) -> None:
     with psycopg.connect(dsn) as conn:
         conn.autocommit = True
         with conn.cursor() as cur:
-            cur.execute("TRUNCATE TABLE posts, users RESTART IDENTITY CASCADE")
+            cur.execute(
+                "TRUNCATE TABLE posts, users, json_payloads, jsonb_arrays "
+                "RESTART IDENTITY CASCADE"
+            )
 
 
 @pytest.fixture(scope="session")
@@ -118,8 +134,9 @@ class ProjectBuilder:
         self.src_path = root / "src"
         self.app_pkg = f"testapp_{test_name}"
         self.app_dir = self.src_path / self.app_pkg
-        self.queries: list[tuple[str, str]] = []
+        self.queries: list[tuple[str, str, dict[str, Any]]] = []
         self.generated_modules: list[Any] = []
+        self.queries_source: str | None = None
 
         self.app_dir.mkdir(parents=True, exist_ok=True)
         (self.app_dir / "__init__.py").touch()
@@ -129,30 +146,43 @@ class ProjectBuilder:
         schema_dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(schema_src, schema_dest)
 
-    def add_query(self, name: str, sql: str) -> None:
-        self.queries.append((name, sql))
+    def set_queries_source(self, source: str) -> None:
+        self.queries_source = textwrap.dedent(source)
 
-    def generate(self) -> Any:
+    def add_query(self, name: str, sql: str, **kwargs: Any) -> None:
+        self.queries.append((name, sql, kwargs))
+
+    def generate_no_import(self) -> bool:
         (self.app_dir / "config.py").write_text(
             f'DSN = "{self.dsn}"\n', encoding="utf-8"
         )
 
-        lines = ["from typing import Any"]
-        lines.extend(["def testdb_sql(q: str, **kwargs: Any) -> Any: ...", ""])
+        if self.queries_source is not None:
+            (self.app_dir / "queries.py").write_text(
+                self.queries_source, encoding="utf-8"
+            )
+        else:
+            lines = ["from typing import Any"]
+            lines.extend(["def testdb_sql(q: str, **kwargs: Any) -> Any: ...", ""])
 
-        for name, sql in self.queries:
-            if name:
-                lines.append(f'{name} = testdb_sql("""{sql}""")')
-            else:
-                lines.append(f'testdb_sql("""{sql}""")')
+            for name, sql, kwargs in self.queries:
+                args = ", ".join(f"{k}={v!r}" for k, v in kwargs.items())
+                call_args = f'"""{sql}"""'
+                if args:
+                    call_args += f", {args}"
 
-        (self.app_dir / "queries.py").write_text("\n".join(lines), encoding="utf-8")
+                if name:
+                    lines.append(f"{name} = testdb_sql({call_args})")
+                else:
+                    lines.append(f"testdb_sql({call_args})")
+
+            (self.app_dir / "queries.py").write_text("\n".join(lines), encoding="utf-8")
 
         if str(self.src_path) not in sys.path:
             sys.path.insert(0, str(self.src_path))
         importlib.invalidate_caches()
 
-        generate_sql_package(
+        return generate_sql_package(
             schema_path=Path("schema.sql"),
             package_full_name=self.pkg_name,
             dsn_import=f"{self.app_pkg}.config:DSN",
@@ -161,6 +191,8 @@ class ProjectBuilder:
             sqlc_command=self._sqlc.sqlc_command(),
         )
 
+    def generate(self) -> Any:
+        self.generate_no_import()
         mod = importlib.import_module(self.pkg_name)
         self.generated_modules.append(mod)
         return mod

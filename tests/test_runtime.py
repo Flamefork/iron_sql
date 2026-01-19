@@ -7,24 +7,31 @@ from iron_sql.runtime import TooManyRowsError
 from tests.conftest import ProjectBuilder
 
 
-async def test_codegen_e2e(test_project: ProjectBuilder):
-    insert_sql = "INSERT INTO users (id, username, is_active) VALUES ($1, $2, $3)"
-    select_sql = "SELECT id, username, is_active FROM users WHERE id = $1"
+def test_unknown_statement_dispatch(test_project: ProjectBuilder) -> None:
+    test_project.add_query("q1", "SELECT 1")
+    mod = test_project.generate()
+    with pytest.raises(KeyError, match="Unknown statement"):
+        mod.testdb_sql("SELECT 42")
 
-    test_project.add_query("ins", insert_sql)
-    test_project.add_query("sel", select_sql)
 
+async def test_runtime_context_pool(test_project: ProjectBuilder) -> None:
+    test_project.add_query("q", "SELECT 1")
     mod = test_project.generate()
 
-    uid = uuid.uuid4()
+    # Nested connection reuse
+    async with mod.testdb_connection() as c1, mod.testdb_connection() as c2:
+        assert c1 is c2
 
-    await mod.testdb_sql(insert_sql).execute(uid, "testuser", True)
+    await mod.testdb_sql("SELECT 1").query_single_row()
 
-    row = await mod.testdb_sql(select_sql).query_single_row(uid)
+    pool = mod.TESTDB_POOL
+    old_inner = pool.psycopg_pool
+    await pool.close()
 
-    assert row.id == uid
-    assert row.username == "testuser"
-    assert row.is_active is True
+    await mod.testdb_sql("SELECT 1").query_single_row()
+    assert pool.psycopg_pool is not old_inner
+
+    pool.psycopg_pool.get_stats()
 
 
 async def test_runtime_errors(test_project: ProjectBuilder):
@@ -52,21 +59,6 @@ async def test_runtime_errors(test_project: ProjectBuilder):
 
     with pytest.raises(TooManyRowsError):
         await mod.testdb_sql(select_sql).query_optional_row("duplicate")
-
-
-async def test_jsonb_roundtrip(test_project: ProjectBuilder):
-    sql = (
-        "INSERT INTO users (id, username, metadata) "
-        "VALUES ($1, $2, $3) RETURNING metadata"
-    )
-    test_project.add_query("q", sql)
-
-    mod = test_project.generate()
-    uid = uuid.uuid4()
-    data = {"key": "value", "list": [1, 2], "nested": {"a": 1}}
-
-    res = await mod.testdb_sql(sql).query_single_row(uid, "json_user", data)
-    assert res == data
 
 
 async def test_transaction_commit(test_project: ProjectBuilder):
