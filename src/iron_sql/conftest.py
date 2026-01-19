@@ -11,6 +11,7 @@ import pytest
 from testcontainers.postgres import PostgresContainer
 
 from iron_sql import generate_sql_package
+from iron_sql.testing import SqlcShim
 
 SCHEMA_SQL = """
     CREATE TABLE IF NOT EXISTS users (
@@ -71,6 +72,11 @@ def _apply_schema_once(pg_dsn: str) -> None:  # pyright: ignore[reportUnusedFunc
     _reset_db(pg_dsn)
 
 
+@pytest.fixture(scope="session")
+def containerized_sqlc(tmp_path_factory: pytest.TempPathFactory) -> SqlcShim:
+    return SqlcShim(tmp_path_factory.mktemp("sqlc_bin"))
+
+
 async def close_generated_pools(module: Any) -> None:
     for name in dir(module):
         if name.endswith("_POOL"):
@@ -80,11 +86,19 @@ async def close_generated_pools(module: Any) -> None:
 
 
 class ProjectBuilder:
-    def __init__(self, root: Path, dsn: str, test_name: str, schema_path: Path):
+    def __init__(
+        self,
+        root: Path,
+        dsn: str,
+        test_name: str,
+        schema_path: Path,
+        sqlc: SqlcShim,
+    ):
         self.root = root
         self.dsn = dsn
         self.test_name = test_name
         self.schema_path = schema_path
+        self._sqlc = sqlc
         self.pkg_name = f"testapp_{test_name}.testdb"
         self.src_path = root / "src"
         self.app_pkg = f"testapp_{test_name}"
@@ -123,12 +137,15 @@ class ProjectBuilder:
             sys.path.insert(0, str(self.src_path))
         importlib.invalidate_caches()
 
-        generate_sql_package(
-            schema_path=Path("schema.sql"),
-            package_full_name=self.pkg_name,
-            dsn_import=f"{self.app_pkg}.config:DSN",
-            src_path=self.src_path,
-        )
+        with self._sqlc.env_context(self.src_path):
+            generate_sql_package(
+                schema_path=Path("schema.sql"),
+                package_full_name=self.pkg_name,
+                dsn_import=f"{self.app_pkg}.config:DSN",
+                src_path=self.src_path,
+                sqlc_path=self._sqlc.path,
+                tempdir_path=self.src_path,
+            )
 
         mod = importlib.import_module(self.pkg_name)
         self.generated_modules.append(mod)
@@ -141,10 +158,13 @@ async def test_project(
     request: pytest.FixtureRequest,
     pg_dsn: str,
     schema_path: Path,
+    containerized_sqlc: SqlcShim,
     _apply_schema_once: None,  # noqa: PT019
 ) -> AsyncIterator[ProjectBuilder]:
     clean_name = request.node.name.replace("[", "_").replace("]", "_").replace("-", "_")
-    builder = ProjectBuilder(tmp_path, pg_dsn, clean_name, schema_path)
+    builder = ProjectBuilder(
+        tmp_path, pg_dsn, clean_name, schema_path, containerized_sqlc
+    )
     yield builder
     for mod in builder.generated_modules:
         await close_generated_pools(mod)

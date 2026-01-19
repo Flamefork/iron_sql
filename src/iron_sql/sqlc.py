@@ -124,6 +124,7 @@ def run_sqlc(
     dsn: str | None,
     debug_path: Path | None = None,
     sqlc_path: Path | None = None,
+    tempdir_path: Path | None = None,
 ) -> SQLCResult:
     if not schema_path.exists():
         msg = f"Schema file not found: {schema_path}"
@@ -147,7 +148,9 @@ def run_sqlc(
         msg = f"sqlc not found at {sqlc_path}"
         raise FileNotFoundError(msg)
 
-    with tempfile.TemporaryDirectory() as tempdir:
+    with tempfile.TemporaryDirectory(
+        dir=str(tempdir_path) if tempdir_path else None
+    ) as tempdir:
         queries_path = Path(tempdir) / "queries.sql"
         queries_path.write_text(
             "\n\n".join(
@@ -174,8 +177,10 @@ def run_sqlc(
         }
         config_path.write_text(json.dumps(sqlc_config, indent=2), encoding="utf-8")
 
+        cmd = [str(sqlc_path), "generate", "--file", str(config_path.resolve())]
+
         sqlc_run_result = subprocess.run(  # noqa: S603
-            [str(sqlc_path), "generate", "--file", str(config_path)],
+            cmd,
             capture_output=True,
             check=False,
         )

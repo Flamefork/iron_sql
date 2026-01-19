@@ -36,4 +36,5 @@ Provide the schema file and DSN import string, then call `generate_sql_package()
 - `dsn_import`: import path to a DSN string, e.g. `myapp.config:CONFIG.db_url.value`.
 - `src_path`: optional base source path for scanning queries (defaults current directory).
 - `sqlc_path`: optional path to the sqlc binary if not in PATH (e.g., `Path("/custom/bin/sqlc")`).
+- `tempdir_path`: optional path for temporary file generation (useful for Docker mounts).
 - Optional `application_name`, `debug_path`, and `to_pascal_fn` if you need naming overrides or want to keep `sqlc` inputs for inspection.

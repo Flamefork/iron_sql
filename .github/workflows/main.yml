@@ -15,10 +15,6 @@ jobs:
         uses: extractions/setup-just@v3
       - name: Install uv
         uses: astral-sh/setup-uv@v6
-      - name: Install sqlc
-        run: |
-          curl -sSL https://github.com/sqlc-dev/sqlc/releases/download/v1.28.0/sqlc_1.28.0_linux_amd64.tar.gz | tar xz
-          sudo mv sqlc /usr/local/bin/
       - name: Run lint
         run: just lint
       - name: Run test
