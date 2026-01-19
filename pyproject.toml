@@ -102,6 +102,7 @@ max-args = 10
 ban-relative-imports = "all"
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 filterwarnings = [
     "error",
     "ignore:The @wait_container_is_ready decorator is deprecated:DeprecationWarning",

@@ -12,7 +12,7 @@ import pytest
 from testcontainers.postgres import PostgresContainer
 
 from iron_sql import generate_sql_package
-from iron_sql.testing import SqlcShim
+from tests.sqlc_testcontainers import SqlcContainer
 
 SCHEMA_SQL = """
     CREATE TABLE IF NOT EXISTS users (
@@ -81,8 +81,15 @@ def _apply_schema_once(pg_dsn: str) -> None:  # pyright: ignore[reportUnusedFunc
 
 
 @pytest.fixture(scope="session")
-def containerized_sqlc(tmp_path_factory: pytest.TempPathFactory) -> SqlcShim:
-    return SqlcShim(tmp_path_factory.mktemp("sqlc_bin"))
+def containerized_sqlc(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[SqlcContainer]:
+    sqlc = SqlcContainer()
+    sqlc.start(tmp_path_factory.getbasetemp())
+    try:
+        yield sqlc
+    finally:
+        sqlc.stop()
 
 
 async def close_generated_pools(module: Any) -> None:
@@ -100,7 +107,7 @@ class ProjectBuilder:
         dsn: str,
         test_name: str,
         schema_path: Path,
-        sqlc: SqlcShim,
+        sqlc: SqlcContainer,
     ):
         self.root = root
         self.dsn = dsn
@@ -145,15 +152,14 @@ class ProjectBuilder:
             sys.path.insert(0, str(self.src_path))
         importlib.invalidate_caches()
 
-        with self._sqlc.env_context(self.src_path):
-            generate_sql_package(
-                schema_path=Path("schema.sql"),
-                package_full_name=self.pkg_name,
-                dsn_import=f"{self.app_pkg}.config:DSN",
-                src_path=self.src_path,
-                sqlc_path=self._sqlc.path,
-                tempdir_path=self.src_path,
-            )
+        generate_sql_package(
+            schema_path=Path("schema.sql"),
+            package_full_name=self.pkg_name,
+            dsn_import=f"{self.app_pkg}.config:DSN",
+            src_path=self.src_path,
+            tempdir_path=self.src_path,
+            sqlc_command=self._sqlc.sqlc_command(),
+        )
 
         mod = importlib.import_module(self.pkg_name)
         self.generated_modules.append(mod)
@@ -166,7 +172,7 @@ async def test_project(
     request: pytest.FixtureRequest,
     pg_dsn: str,
     schema_path: Path,
-    containerized_sqlc: SqlcShim,
+    containerized_sqlc: SqlcContainer,
     _apply_schema_once: None,  # noqa: PT019
 ) -> AsyncIterator[ProjectBuilder]:
     clean_name = request.node.name.replace("[", "_").replace("]", "_").replace("-", "_")

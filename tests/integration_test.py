@@ -2,9 +2,9 @@ import uuid
 
 import pytest
 
-from iron_sql.conftest import ProjectBuilder
 from iron_sql.runtime import NoRowsError
 from iron_sql.runtime import TooManyRowsError
+from tests.conftest import ProjectBuilder
 
 
 async def test_codegen_e2e(test_project: ProjectBuilder):

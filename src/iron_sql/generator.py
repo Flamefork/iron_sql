@@ -42,6 +42,7 @@ def generate_sql_package(  # noqa: PLR0914
     src_path: Path = Path(),
     sqlc_path: Path | None = None,
     tempdir_path: Path | None = None,
+    sqlc_command: list[str] | None = None,
 ) -> bool:
     """Generate a typed SQL package from schema and queries.
 
@@ -57,6 +58,7 @@ def generate_sql_package(  # noqa: PLR0914
         src_path: Base source path for scanning queries (default: Path())
         sqlc_path: Optional path to sqlc binary if not in PATH
         tempdir_path: Optional path for temporary file generation
+        sqlc_command: Optional command prefix to run sqlc
 
     Returns:
         True if the package was generated or modified, False otherwise
@@ -80,6 +82,7 @@ def generate_sql_package(  # noqa: PLR0914
         debug_path=debug_path,
         sqlc_path=sqlc_path,
         tempdir_path=tempdir_path,
+        sqlc_command=sqlc_command,
     )
 
     if sqlc_res.error:
