@@ -122,7 +122,7 @@ def generate_sql_package(  # noqa: PLR0914
         render_query_overload(sql_fn_name, q.name, q.stmt, q.row_type) for q in queries
     ]
 
-    query_cases = [render_query_case(q.name, q.stmt) for q in queries]
+    query_dict_entries = [render_query_dict_entry(q.name, q.stmt) for q in queries]
 
     new_content = render_package(
         dsn_import_package,
@@ -132,7 +132,7 @@ def generate_sql_package(  # noqa: PLR0914
         sorted(entities),
         sorted(query_classes),
         sorted(query_overloads),
-        sorted(query_cases),
+        sorted(query_dict_entries),
         application_name,
     )
     changed = write_if_changed(target_package_path, new_content + "\n")
@@ -149,7 +149,7 @@ def render_package(
     entities: list[str],
     query_classes: list[str],
     query_overloads: list[str],
-    query_cases: list[str],
+    query_dict_entries: list[str],
     application_name: str | None = None,
 ):
     return f"""
@@ -195,7 +195,7 @@ from {dsn_import_package} import {dsn_import_path.split(".", maxsplit=1)[0]}
 {package_name.upper()}_POOL = runtime.ConnectionPool(
     {dsn_import_path},
     name="{package_name}",
-    application_name="{application_name}",
+    application_name={application_name!r},
 )
 
 _{package_name}_connection = ContextVar[psycopg.AsyncConnection | None](
@@ -228,14 +228,21 @@ class Query:
 {"\n\n\n".join(query_classes)}
 
 
+_QUERIES: dict[str, type[Query]] = {{
+    {("," + chr(10) + "    ").join(query_dict_entries)},
+}}
+
+
 {"\n".join(query_overloads)}
 @overload
 def {sql_fn_name}(stmt: str) -> Query: ...
 
 
 def {sql_fn_name}(stmt: str, row_type: str | None = None) -> Query:
-    {indent_block("\n".join(query_cases), "    ")}
-    return Query()
+    if stmt in _QUERIES:
+        return _QUERIES[stmt]()
+    msg = f"Unknown statement: {{stmt!r}}"
+    raise KeyError(msg)
 
     """.strip()
 
@@ -333,11 +340,11 @@ async def query_all_rows({", ".join(query_fn_params)}) -> list[{result}]:
 
 async def query_single_row({", ".join(query_fn_params)}) -> {result}:
     async with self._execute({params_arg}) as cur:
-        return runtime.get_one_row(await cur.fetchall())
+        return runtime.get_one_row(await cur.fetchmany(2))
 
 async def query_optional_row({", ".join(query_fn_params)}) -> {base_result} | None:
     async with self._execute({params_arg}) as cur:
-        return runtime.get_one_row_or_none(await cur.fetchall())
+        return runtime.get_one_row_or_none(await cur.fetchmany(2))
 
         """.strip()
     else:
@@ -382,13 +389,8 @@ def {sql_fn_name}(stmt: Literal[{stmt!r}]{result_arg}) -> {query_name}: ...
     """.strip()
 
 
-def render_query_case(query_name: str, stmt: str) -> str:
-    return f"""
-
-if stmt == {stmt!r}:
-    return {query_name}()
-
-    """.strip()
+def render_query_dict_entry(query_name: str, stmt: str) -> str:
+    return f"{stmt!r}: {query_name}"
 
 
 @dataclass(kw_only=True)

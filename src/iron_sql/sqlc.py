@@ -8,11 +8,6 @@ from pathlib import Path
 
 import pydantic
 
-SQLC_QUERY_TPL = """
-    -- name: ${name} :exec
-    ${stmt};
-"""
-
 
 class CatalogReference(pydantic.BaseModel):
     catalog: str
