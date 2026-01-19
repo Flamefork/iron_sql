@@ -1,6 +1,6 @@
 [project]
 name = "iron-sql"
-version = "0.1.1"
+version = "0.1.2"
 
 description = "iron_sql generates typed async PostgreSQL clients and runtime helpers from schemas and SQL queries"
 readme = "README.md"
