@@ -13,6 +13,8 @@ DEFAULT_TIMEOUT_SECONDS = 120
 
 def _fetch_sqlc_binary(image: str) -> bytes:
     client = docker.from_env()
+    if not client.images.list(filters={"reference": image}):
+        client.images.pull(image)
     container = client.containers.create(image)
     try:
         stream, _ = container.get_archive("/workspace/sqlc")
