@@ -15,7 +15,9 @@ from pydantic import alias_generators
 
 from iron_sql.sqlc import Catalog
 from iron_sql.sqlc import Column
+from iron_sql.sqlc import Enum
 from iron_sql.sqlc import Query
+from iron_sql.sqlc import SQLCResult
 from iron_sql.sqlc import run_sqlc
 
 logger = logging.getLogger(__name__)
@@ -31,13 +33,38 @@ class ColumnPySpec:
     py_type: str
 
 
-def generate_sql_package(  # noqa: PLR0914
+def _collect_used_enums(sqlc_res: SQLCResult) -> set[tuple[str, str]]:
+    used = set()
+    catalog = sqlc_res.catalog
+    default_schema = catalog.default_schema
+
+    def check_column(col: Column) -> None:
+        schema_name = col.type.schema_name or default_schema
+        if schema_name and catalog.schema_by_name(schema_name).has_enum(col.type.name):
+            used.add((schema_name, col.type.name))
+
+    for q in sqlc_res.queries:
+        for c in q.columns:
+            check_column(c)
+        for p in q.params:
+            check_column(p.column)
+
+    for schema_name in sqlc_res.used_schemas():
+        for table in catalog.schema_by_name(schema_name).tables:
+            for c in table.columns:
+                check_column(c)
+
+    return used
+
+
+def generate_sql_package(  # noqa: PLR0913, PLR0914
     *,
     schema_path: Path,
     package_full_name: str,
     dsn_import: str,
     application_name: str | None = None,
     to_pascal_fn=alias_generators.to_pascal,
+    to_snake_fn=alias_generators.to_snake,
     debug_path: Path | None = None,
     src_path: Path = Path(),
     sqlc_path: Path | None = None,
@@ -54,6 +81,8 @@ def generate_sql_package(  # noqa: PLR0914
         application_name: Optional application name for connection pool
         to_pascal_fn: Function to convert names to PascalCase (default:
             pydantic's to_pascal)
+        to_snake_fn: Function to convert names to snake_case (default:
+            pydantic's to_snake)
         debug_path: Optional path to save sqlc inputs for inspection
         src_path: Base source path for scanning queries (default: Path())
         sqlc_path: Optional path to sqlc binary if not in PATH
@@ -100,6 +129,15 @@ def generate_sql_package(  # noqa: PLR0914
 
     entities = [render_entity(e.name, e.column_specs) for e in ordered_entities]
 
+    used_enums = _collect_used_enums(sqlc_res)
+
+    enums = [
+        render_enum_class(e, package_name, to_pascal_fn, to_snake_fn)
+        for schema in sqlc_res.catalog.schemas
+        for e in schema.enums
+        if (schema.name, e.name) in used_enums
+    ]
+
     query_classes = [
         render_query_class(
             q.name,
@@ -107,7 +145,14 @@ def generate_sql_package(  # noqa: PLR0914
             package_name,
             [
                 (
-                    column_py_spec(p.column, sqlc_res.catalog, p.number),
+                    column_py_spec(
+                        p.column,
+                        sqlc_res.catalog,
+                        package_name,
+                        to_pascal_fn,
+                        to_snake_fn,
+                        p.number,
+                    ),
                     p.column.is_named_param,
                 )
                 for p in q.params
@@ -130,6 +175,7 @@ def generate_sql_package(  # noqa: PLR0914
         package_name,
         sql_fn_name,
         sorted(entities),
+        sorted(enums),
         sorted(query_classes),
         sorted(query_overloads),
         sorted(query_dict_entries),
@@ -147,6 +193,7 @@ def render_package(
     package_name: str,
     sql_fn_name: str,
     entities: list[str],
+    enums: list[str],
     query_classes: list[str],
     query_overloads: list[str],
     query_dict_entries: list[str],
@@ -181,6 +228,7 @@ from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Literal
 from typing import overload
 
@@ -218,6 +266,9 @@ async def {package_name}_transaction() -> AsyncIterator[None]:
         yield
 
 
+{"\n\n\n".join(enums)}
+
+
 {"\n\n\n".join(entities)}
 
 
@@ -229,7 +280,7 @@ class Query:
 
 
 _QUERIES: dict[str, type[Query]] = {{
-    {("," + chr(10) + "    ").join(query_dict_entries)},
+    {(",\n    ").join(query_dict_entries)}
 }}
 
 
@@ -243,6 +294,37 @@ def {sql_fn_name}(stmt: str, row_type: str | None = None) -> Query:
         return _QUERIES[stmt]()
     msg = f"Unknown statement: {{stmt!r}}"
     raise KeyError(msg)
+
+    """.strip()
+
+
+def render_enum_class(
+    enum: Enum,
+    package_name: str,
+    to_pascal_fn: Callable[[str], str],
+    to_snake_fn: Callable[[str], str],
+) -> str:
+    class_name = to_pascal_fn(f"{package_name}_{enum.name}")
+    members = []
+    seen_names: dict[str, int] = {}
+
+    for val in enum.vals:
+        name = to_snake_fn(val).upper()
+        name = "".join(c if c.isalnum() else "_" for c in name)
+        name = name.strip("_") or "EMPTY"
+        if name[0].isdigit():
+            name = "_" + name
+        if name in seen_names:
+            seen_names[name] += 1
+            name = f"{name}_{seen_names[name]}"
+        else:
+            seen_names[name] = 1
+        members.append(f'{name} = "{val}"')
+
+    return f"""
+
+class {class_name}(StrEnum):
+    {indent_block("\n".join(members), "    ")}
 
     """.strip()
 
@@ -418,6 +500,7 @@ class SQLEntity:
     columns: list[Column]
     catalog: Catalog = dataclasses.field(repr=False)
     to_pascal_fn: Callable[[str], str]
+    to_snake_fn: Callable[[str], str] = inflection.underscore
 
     @property
     def name(self) -> str:
@@ -433,7 +516,12 @@ class SQLEntity:
 
     @property
     def column_specs(self) -> tuple[ColumnPySpec, ...]:
-        return tuple(column_py_spec(c, self.catalog) for c in self.columns)
+        return tuple(
+            column_py_spec(
+                c, self.catalog, self.package_name, self.to_pascal_fn, self.to_snake_fn
+            )
+            for c in self.columns
+        )
 
 
 def map_entities(
@@ -443,6 +531,7 @@ def map_entities(
     used_schemas: list[str],
     queries_from_code: list[CodeQuery],
     to_pascal_fn: Callable[[str], str],
+    to_snake_fn: Callable[[str], str] = inflection.underscore,
 ):
     row_types = {q.name: q.row_type for q in queries_from_code}
 
@@ -454,6 +543,7 @@ def map_entities(
             columns=t.columns,
             catalog=catalog,
             to_pascal_fn=to_pascal_fn,
+            to_snake_fn=to_snake_fn,
         )
         for sch in used_schemas
         for t in catalog.schema_by_name(sch).tables
@@ -476,6 +566,7 @@ def map_entities(
             columns=q.columns,
             catalog=catalog,
             to_pascal_fn=to_pascal_fn,
+            to_snake_fn=to_snake_fn,
         )
         for q in queries_from_sqlc
         if len(q.columns) > 1
@@ -495,7 +586,9 @@ def map_entities(
         if len(q.columns) == 0:
             result_types[q.name] = "None"
         elif len(q.columns) == 1:
-            result_types[q.name] = column_py_spec(q.columns[0], catalog).py_type
+            result_types[q.name] = column_py_spec(
+                q.columns[0], catalog, package_name, to_pascal_fn, to_snake_fn
+            ).py_type
         else:
             column_spec = query_result_entities[q.name].column_specs
             result_types[q.name] = unique_entities[column_spec].name
@@ -504,7 +597,12 @@ def map_entities(
 
 
 def column_py_spec(  # noqa: C901, PLR0912
-    column: Column, catalog: Catalog, number: int = 0
+    column: Column,
+    catalog: Catalog,
+    package_name: str,
+    to_pascal_fn: Callable[[str], str],
+    _to_snake_fn: Callable[[str], str] = inflection.underscore,
+    number: int = 0,
 ) -> ColumnPySpec:
     db_type = column.type.name.removeprefix("pg_catalog.")
     match db_type:
@@ -541,8 +639,10 @@ def column_py_spec(  # noqa: C901, PLR0912
             py_type = "uuid.UUID"
         case "any" | "anyelement":
             py_type = "object"
-        case enum if catalog.schema_by_ref(column.table).has_enum(enum):
-            py_type = "str"
+        case enum if (
+            sch := column.type.schema_name or catalog.default_schema
+        ) and catalog.schema_by_name(sch).has_enum(enum):
+            py_type = to_pascal_fn(f"{package_name}_{enum}") if package_name else "str"
         case _:
             logger.warning(f"Unknown SQL type: {column.type.name} ({column.name})")
             py_type = "object"

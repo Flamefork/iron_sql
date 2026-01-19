@@ -2,6 +2,7 @@ from collections.abc import AsyncIterator
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
+from enum import Enum
 from typing import Any
 from typing import Literal
 from typing import Self
@@ -123,6 +124,8 @@ def typed_scalar_row[T](
             if not not_null and val is None:
                 return None
             if not isinstance(val, typ):
+                if issubclass(typ, Enum):
+                    return typ(val)
                 msg = f"Expected scalar of type {typ}, got {type(val)}"
                 raise TypeError(msg)
             return val
