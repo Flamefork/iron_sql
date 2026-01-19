@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import shutil
 import sys
@@ -57,7 +58,7 @@ def schema_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return path
 
 
-def _reset_db(dsn: str) -> None:
+def _apply_schema(dsn: str) -> None:
     with psycopg.connect(dsn) as conn:
         conn.autocommit = True
         with conn.cursor() as cur:
@@ -67,9 +68,16 @@ def _reset_db(dsn: str) -> None:
             cur.execute(SCHEMA_SQL)
 
 
+def _cleanup_data(dsn: str) -> None:
+    with psycopg.connect(dsn) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("TRUNCATE TABLE posts, users RESTART IDENTITY CASCADE")
+
+
 @pytest.fixture(scope="session")
 def _apply_schema_once(pg_dsn: str) -> None:  # pyright: ignore[reportUnusedFunction]
-    _reset_db(pg_dsn)
+    _apply_schema(pg_dsn)
 
 
 @pytest.fixture(scope="session")
@@ -168,4 +176,5 @@ async def test_project(
     yield builder
     for mod in builder.generated_modules:
         await close_generated_pools(mod)
-    _reset_db(pg_dsn)
+        sys.modules.pop(builder.pkg_name, None)
+    await asyncio.to_thread(_cleanup_data, pg_dsn)
