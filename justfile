@@ -1,5 +1,5 @@
 test +args="":
-    uv run pytest -vv --color=yes --showlocals --no-header '{{ args }}'
+    uv run pytest -vv --color=yes --showlocals '{{ args }}'
 
 format:
     uv run ruff format .
