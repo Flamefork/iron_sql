@@ -218,7 +218,6 @@ class ProjectBuilder:
 
         if str(self.src_path) not in sys.path:
             sys.path.insert(0, str(self.src_path))
-        importlib.invalidate_caches()
 
         return generate_sql_package(
             schema_path=Path("schema.sql"),
@@ -232,9 +231,8 @@ class ProjectBuilder:
     def generate(self) -> Any:
         self.generate_no_import()
 
-        # Force fresh import
-        if self.pkg_name in sys.modules:
-            sys.modules.pop(self.pkg_name)
+        importlib.invalidate_caches()
+        sys.modules.pop(self.pkg_name, None)
 
         mod = importlib.import_module(self.pkg_name)
         self.generated_modules.append(mod)
