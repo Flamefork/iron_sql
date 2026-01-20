@@ -1,6 +1,8 @@
 import keyword
 from enum import StrEnum
 
+import pytest
+
 from tests.conftest import ProjectBuilder
 
 
@@ -176,3 +178,33 @@ async def test_pg_catalog_type_does_not_break_generation(
 
     row = await mod.testdb_sql(sql).query_single_row()
     assert row == 1
+
+
+def test_pg_catalog_does_not_trigger_warnings(
+    test_project: ProjectBuilder, caplog: pytest.LogCaptureFixture
+) -> None:
+    test_project.add_query("get_user", "SELECT * FROM users")
+
+    test_project.generate()
+
+    assert "Unknown SQL type" not in caplog.text
+
+
+async def test_table_column_enum_not_in_query_is_skipped(
+    test_project: ProjectBuilder,
+) -> None:
+    extra_schema = """
+    CREATE TYPE table_only_status AS ENUM ('pending', 'processed');
+    CREATE TABLE status_log (
+        id SERIAL PRIMARY KEY,
+        status table_only_status NOT NULL
+    );
+    """
+
+    await test_project.extend_schema(extra_schema)
+
+    test_project.add_query("get_users", "SELECT * FROM users")
+
+    mod = test_project.generate()
+
+    assert not hasattr(mod, "TestdbTableOnlyStatus")
