@@ -39,12 +39,6 @@ def _collect_used_enums(sqlc_res: SQLCResult) -> set[tuple[str, str]]:
         for col in (
             *(c for q in sqlc_res.queries for c in q.columns),
             *(p.column for q in sqlc_res.queries for p in q.params),
-            *(
-                c
-                for schema_name in sqlc_res.used_schemas()
-                for table in sqlc_res.catalog.schema_by_name(schema_name).tables
-                for c in table.columns
-            ),
         )
         for schema in (sqlc_res.catalog.schema_by_ref(col.type),)
         if schema.has_enum(col.type.name)

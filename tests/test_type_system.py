@@ -188,3 +188,23 @@ def test_pg_catalog_does_not_trigger_warnings(
     test_project.generate()
 
     assert "Unknown SQL type" not in caplog.text
+
+
+async def test_table_column_enum_not_in_query_is_skipped(
+    test_project: ProjectBuilder,
+) -> None:
+    extra_schema = """
+    CREATE TYPE table_only_status AS ENUM ('pending', 'processed');
+    CREATE TABLE status_log (
+        id SERIAL PRIMARY KEY,
+        status table_only_status NOT NULL
+    );
+    """
+
+    await test_project.extend_schema(extra_schema)
+
+    test_project.add_query("get_users", "SELECT * FROM users")
+
+    mod = test_project.generate()
+
+    assert not hasattr(mod, "TestdbTableOnlyStatus")
