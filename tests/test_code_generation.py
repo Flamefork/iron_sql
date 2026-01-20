@@ -77,3 +77,42 @@ def test_unsupported_param_types_array(test_project: ProjectBuilder) -> None:
     )
     with pytest.raises(TypeError, match=r"Unsupported column type: jsonb\[\]"):
         test_project.generate_no_import()
+
+
+def test_generator_is_idempotent(test_project: ProjectBuilder) -> None:
+    assert test_project.generate_no_import() is True
+    assert test_project.generate_no_import() is False
+
+
+def test_generator_valid_explicit_row_type(test_project: ProjectBuilder) -> None:
+    test_project.set_queries_source(
+        """
+        from typing import Any
+        def testdb_sql(q: str, **kwargs: Any) -> Any: ...
+
+        RT = "UserMini"
+        q = testdb_sql("SELECT id, username FROM users", row_type="UserMini")
+        """
+    )
+    assert test_project.generate_no_import() is True
+
+
+async def test_special_types_params(test_project: ProjectBuilder) -> None:
+    await test_project.extend_schema(
+        """
+        CREATE TABLE special_types (
+            id uuid PRIMARY KEY,
+            d date NOT NULL,
+            t time NOT NULL,
+            ts timestamp NOT NULL,
+            b boolean NOT NULL,
+            j jsonb
+        );
+        """
+    )
+    test_project.add_query(
+        "insert_special",
+        "INSERT INTO special_types (id, d, t, ts, b, j) "
+        "VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    assert test_project.generate_no_import() is True
