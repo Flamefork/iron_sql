@@ -34,27 +34,21 @@ class ColumnPySpec:
 
 
 def _collect_used_enums(sqlc_res: SQLCResult) -> set[tuple[str, str]]:
-    used = set()
-    catalog = sqlc_res.catalog
-    default_schema = catalog.default_schema
-
-    def check_column(col: Column) -> None:
-        schema_name = col.type.schema_name or default_schema
-        if schema_name and catalog.schema_by_name(schema_name).has_enum(col.type.name):
-            used.add((schema_name, col.type.name))
-
-    for q in sqlc_res.queries:
-        for c in q.columns:
-            check_column(c)
-        for p in q.params:
-            check_column(p.column)
-
-    for schema_name in sqlc_res.used_schemas():
-        for table in catalog.schema_by_name(schema_name).tables:
-            for c in table.columns:
-                check_column(c)
-
-    return used
+    return {
+        (schema.name, col.type.name)
+        for col in (
+            *(c for q in sqlc_res.queries for c in q.columns),
+            *(p.column for q in sqlc_res.queries for p in q.params),
+            *(
+                c
+                for schema_name in sqlc_res.used_schemas()
+                for table in sqlc_res.catalog.schema_by_name(schema_name).tables
+                for c in table.columns
+            ),
+        )
+        for schema in (sqlc_res.catalog.schema_by_ref(col.type),)
+        if schema.has_enum(col.type.name)
+    }
 
 
 def generate_sql_package(  # noqa: PLR0913, PLR0914
@@ -639,9 +633,7 @@ def column_py_spec(  # noqa: C901, PLR0912
             py_type = "uuid.UUID"
         case "any" | "anyelement":
             py_type = "object"
-        case enum if (
-            sch := column.type.schema_name or catalog.default_schema
-        ) and catalog.schema_by_name(sch).has_enum(enum):
+        case enum if catalog.schema_by_ref(column.type).has_enum(enum):
             py_type = to_pascal_fn(f"{package_name}_{enum}") if package_name else "str"
         case _:
             logger.warning(f"Unknown SQL type: {column.type.name} ({column.name})")

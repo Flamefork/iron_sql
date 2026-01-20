@@ -74,11 +74,8 @@ class Catalog(pydantic.BaseModel):
         msg = f"Schema not found: {name}"
         raise ValueError(msg)
 
-    def schema_by_ref(self, ref: CatalogReference | None) -> Schema:
-        schema = self.default_schema
-        if ref and ref.schema_name:
-            schema = ref.schema_name
-        return self.schema_by_name(schema)
+    def schema_by_ref(self, ref: CatalogReference) -> Schema:
+        return self.schema_by_name(ref.schema_name or self.default_schema)
 
 
 class QueryParameter(pydantic.BaseModel):

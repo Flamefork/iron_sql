@@ -88,7 +88,6 @@ ignore = [
     "RUF003",
     "TC006",
     "TD",
-    "TRY300",
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -104,18 +103,23 @@ max-args = 10
 ban-relative-imports = "all"
 
 [tool.pytest.ini_options]
+strict = true
 testpaths = ["tests"]
 filterwarnings = [
     "error",
     "ignore:.*wait_container_is_ready:DeprecationWarning",
 ]
-addopts = ["--no-cov-on-fail", "--cov-report=term-missing:skip-covered"]
+addopts = [
+    "--import-mode=importlib",
+    "--no-cov-on-fail",
+    "--cov-report=term-missing:skip-covered",
+]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
 [tool.coverage.run]
 branch = true
-omit = ["test_*.py", "testdb.py"]
+omit = ["tests/*.py", "testdb.py"]
 data_file = ".coverage/db.sqlite"
 
 [tool.coverage.html]
