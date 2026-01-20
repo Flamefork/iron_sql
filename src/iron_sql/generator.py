@@ -301,7 +301,7 @@ def render_enum_class(
         name = "".join(c if c.isalnum() else "_" for c in name)
         name = name.strip("_") or "EMPTY"
         if name[0].isdigit():
-            name = "_" + name
+            name = "NUM" + name
         if name in seen_names:
             seen_names[name] += 1
             name = f"{name}_{seen_names[name]}"

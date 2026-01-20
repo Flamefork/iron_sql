@@ -1,4 +1,3 @@
-import keyword
 from enum import StrEnum
 
 import pytest
@@ -117,13 +116,11 @@ async def test_enum_value_name_normalization(test_project: ProjectBuilder) -> No
     mod = test_project.generate()
 
     enum_cls = mod.TestdbWeirdEnum
-    expected = {"1st", "foo-bar", "foo_bar"}
+    assert enum_cls.NUM1ST == "1st"
+    assert enum_cls.FOO_BAR == "foo-bar"
+    assert enum_cls.FOO_BAR_2 == "foo_bar"
 
-    assert {member.value for member in enum_cls} == expected
-    assert len(enum_cls.__members__) == len(expected)
-    for name in enum_cls.__members__:
-        assert name.isidentifier()
-        assert not keyword.iskeyword(name.lower())
+    assert len(enum_cls.__members__) == 3
 
 
 async def test_enum_empty_label_value(test_project: ProjectBuilder) -> None:
