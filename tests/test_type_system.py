@@ -1,6 +1,8 @@
 import keyword
 from enum import StrEnum
 
+import pytest
+
 from tests.conftest import ProjectBuilder
 
 
@@ -176,3 +178,13 @@ async def test_pg_catalog_type_does_not_break_generation(
 
     row = await mod.testdb_sql(sql).query_single_row()
     assert row == 1
+
+
+def test_pg_catalog_does_not_trigger_warnings(
+    test_project: ProjectBuilder, caplog: pytest.LogCaptureFixture
+) -> None:
+    test_project.add_query("get_user", "SELECT * FROM users")
+
+    test_project.generate()
+
+    assert "Unknown SQL type" not in caplog.text

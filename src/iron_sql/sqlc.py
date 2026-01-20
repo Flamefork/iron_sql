@@ -97,14 +97,12 @@ class SQLCResult(pydantic.BaseModel):
     queries: list[Query]
 
     def used_schemas(self) -> list[str]:
-        table_schemas = {
+        result = {
             c.table.schema_name
             for q in self.queries
             for c in q.columns
             if c.table is not None
         }
-        type_schemas = {c.type.schema_name for q in self.queries for c in q.columns}
-        result = {*table_schemas, *type_schemas}
         if "" in result:
             result.remove("")
             result.add(self.catalog.default_schema)
