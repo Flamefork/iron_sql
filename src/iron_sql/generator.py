@@ -292,7 +292,7 @@ def render_enum_class(
     to_pascal_fn: Callable[[str], str],
     to_snake_fn: Callable[[str], str],
 ) -> str:
-    class_name = to_pascal_fn(f"{package_name}_{enum.name}")
+    class_name = to_pascal_fn(f"{package_name}_{to_snake_fn(enum.name)}")
     members = []
     seen_names: dict[str, int] = {}
 
@@ -589,7 +589,7 @@ def column_py_spec(  # noqa: C901, PLR0912
     catalog: Catalog,
     package_name: str,
     to_pascal_fn: Callable[[str], str],
-    _to_snake_fn: Callable[[str], str] = inflection.underscore,
+    to_snake_fn: Callable[[str], str] = inflection.underscore,
     number: int = 0,
 ) -> ColumnPySpec:
     db_type = column.type.name.removeprefix("pg_catalog.")
@@ -628,7 +628,11 @@ def column_py_spec(  # noqa: C901, PLR0912
         case "any" | "anyelement":
             py_type = "object"
         case enum if catalog.schema_by_ref(column.type).has_enum(enum):
-            py_type = to_pascal_fn(f"{package_name}_{enum}") if package_name else "str"
+            py_type = (
+                to_pascal_fn(f"{package_name}_{to_snake_fn(enum)}")
+                if package_name
+                else "str"
+            )
         case _:
             logger.warning(f"Unknown SQL type: {column.type.name} ({column.name})")
             py_type = "object"

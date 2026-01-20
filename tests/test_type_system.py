@@ -101,7 +101,7 @@ async def test_enum_naming_normalization(test_project: ProjectBuilder) -> None:
 
     mod = test_project.generate()
 
-    assert hasattr(mod, "TestdbCamelcaseenum")
+    assert hasattr(mod, "TestdbCamelCaseEnum")
     assert hasattr(mod, "TestdbScreamingEnum")
 
 
