@@ -7,7 +7,6 @@ from collections import defaultdict
 from collections.abc import Callable
 from collections.abc import Iterator
 from dataclasses import dataclass
-from operator import attrgetter
 from pathlib import Path
 
 import inflection
@@ -90,7 +89,8 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
     queries = list(find_all_queries(src_path, sql_fn_name))
     queries = list({q.name: q for q in queries}.values())
 
-    dsn = attrgetter(dsn_import_path)(importlib.import_module(dsn_import_package))
+    dsn_package = importlib.import_module(dsn_import_package)
+    dsn = eval(dsn_import_path, vars(dsn_package))  # noqa: S307
 
     sqlc_res = run_sqlc(
         src_path / schema_path,

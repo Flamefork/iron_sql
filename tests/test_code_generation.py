@@ -1,5 +1,9 @@
+import sys
+from pathlib import Path
+
 import pytest
 
+from iron_sql import generate_sql_package
 from tests.conftest import ProjectBuilder
 
 
@@ -116,3 +120,38 @@ async def test_special_types_params(test_project: ProjectBuilder) -> None:
         "VALUES ($1, $2, $3, $4, $5, $6)",
     )
     assert test_project.generate_no_import() is True
+
+
+def test_dsn_import_with_function_call(test_project: ProjectBuilder) -> None:
+    (test_project.app_dir / "config.py").write_text(
+        f"""
+class Config:
+    def __init__(self, dsn: str):
+        self._dsn = dsn
+    def get_dsn(self) -> str:
+        return self._dsn
+
+CONFIG = Config("{test_project.dsn}")
+""",
+        encoding="utf-8",
+    )
+
+    test_project.add_query("q", "SELECT 1 as value")
+
+    if str(test_project.src_path) not in sys.path:
+        sys.path.insert(0, str(test_project.src_path))
+
+    generate_sql_package(
+        schema_path=Path("schema.sql"),
+        package_full_name=test_project.pkg_name,
+        dsn_import=f"{test_project.app_pkg}.config:CONFIG.get_dsn()",
+        src_path=test_project.src_path,
+        tempdir_path=test_project.src_path,
+        sqlc_command=test_project.sqlc.sqlc_command(),
+    )
+
+    generated_path = (
+        test_project.src_path / f"{test_project.pkg_name.replace('.', '/')}.py"
+    )
+    generated = generated_path.read_text()
+    assert "CONFIG.get_dsn()" in generated
