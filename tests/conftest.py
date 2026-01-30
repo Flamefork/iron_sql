@@ -157,7 +157,7 @@ class ProjectBuilder:
         self.dsn = dsn
         self.test_name = test_name
         self.schema_path = schema_path
-        self._sqlc = sqlc
+        self.sqlc = sqlc
         self.pkg_name = f"testapp_{test_name}.testdb"
         self.src_path = root / "src"
         self.app_pkg = f"testapp_{test_name}"
@@ -225,7 +225,7 @@ class ProjectBuilder:
             dsn_import=f"{self.app_pkg}.config:DSN",
             src_path=self.src_path,
             tempdir_path=self.src_path,
-            sqlc_command=self._sqlc.sqlc_command(),
+            sqlc_command=self.sqlc.sqlc_command(),
         )
 
     def generate(self) -> Any:

@@ -33,7 +33,7 @@ iron_sql keeps SQL close to Python call sites while giving you typed, async quer
 Provide the schema file and DSN import string, then call `generate_sql_package()` with:
 - `schema_path`: path to the schema SQL file (relative to `src_path`).
 - `package_full_name`: target module, e.g. `myapp.db`.
-- `dsn_import`: import path to a DSN string, e.g. `myapp.config:CONFIG.db_url.value`.
+- `dsn_import`: import path to a DSN string, e.g. `myapp.config:CONFIG.db_url.get_value()`.
 - `src_path`: optional base source path for scanning queries (defaults current directory).
 - `sqlc_path`: optional path to the sqlc binary if not in PATH (e.g., `Path("/custom/bin/sqlc")`).
 - `tempdir_path`: optional path for temporary file generation (useful for Docker mounts).
