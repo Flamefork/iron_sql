@@ -1,7 +1,9 @@
+import warnings
 from enum import StrEnum
 
 import pytest
 
+from iron_sql import UnknownSQLTypeWarning
 from tests.conftest import ProjectBuilder
 
 
@@ -178,13 +180,68 @@ async def test_pg_catalog_type_does_not_break_generation(
 
 
 def test_pg_catalog_does_not_trigger_warnings(
-    test_project: ProjectBuilder, caplog: pytest.LogCaptureFixture
+    test_project: ProjectBuilder,
 ) -> None:
     test_project.add_query("get_user", "SELECT * FROM users")
 
-    test_project.generate()
+    with warnings.catch_warnings(record=True) as warning_messages:
+        warnings.simplefilter("always", UnknownSQLTypeWarning)
+        test_project.generate()
 
-    assert "Unknown SQL type" not in caplog.text
+    unknown_type_warnings = [
+        w for w in warning_messages if issubclass(w.category, UnknownSQLTypeWarning)
+    ]
+    assert not unknown_type_warnings
+
+
+async def test_unknown_sql_type_warns_and_maps_to_object(
+    test_project: ProjectBuilder,
+) -> None:
+    extra_schema = """
+    CREATE TYPE unknown_composite AS (x integer);
+    CREATE TABLE unknown_table (
+        id SERIAL PRIMARY KEY,
+        val unknown_composite NOT NULL
+    );
+    """
+
+    await test_project.extend_schema(extra_schema)
+
+    test_project.add_query("get_unknown", "SELECT * FROM unknown_table")
+
+    with warnings.catch_warnings(record=True) as warning_messages:
+        warnings.simplefilter("always", UnknownSQLTypeWarning)
+        mod = test_project.generate()
+
+    unknown_type_warnings = [
+        w for w in warning_messages if issubclass(w.category, UnknownSQLTypeWarning)
+    ]
+    assert unknown_type_warnings
+    assert "unknown_composite" in str(unknown_type_warnings[0].message)
+
+    entity_cls = mod.TestdbUnknownTable
+    assert entity_cls.__annotations__["val"] is object
+
+
+async def test_unknown_sql_type_can_be_promoted_to_error(
+    test_project: ProjectBuilder,
+) -> None:
+    extra_schema = """
+    CREATE TYPE unknown_composite AS (x integer);
+    CREATE TABLE unknown_table (
+        id SERIAL PRIMARY KEY,
+        val unknown_composite NOT NULL
+    );
+    """
+
+    await test_project.extend_schema(extra_schema)
+
+    test_project.add_query("get_unknown", "SELECT * FROM unknown_table")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnknownSQLTypeWarning)
+        with pytest.raises(UnknownSQLTypeWarning, match="unknown_composite"):
+            test_project.generate()
 
 
 async def test_table_column_enum_not_in_query_is_skipped(

@@ -1,8 +1,10 @@
 import ast
 import dataclasses
+import functools
 import hashlib
 import importlib
 import logging
+import warnings
 from collections import defaultdict
 from collections.abc import Callable
 from collections.abc import Iterator
@@ -30,6 +32,10 @@ class ColumnPySpec:
     not_null: bool
     is_array: bool
     py_type: str
+
+
+class UnknownSQLTypeWarning(UserWarning):
+    pass
 
 
 def _collect_used_enums(sqlc_res: SQLCResult) -> set[tuple[str, str]]:
@@ -503,7 +509,7 @@ class SQLEntity:
         md5_hash = hashlib.md5(hash_base.encode(), usedforsecurity=False).hexdigest()
         return f"QueryResult_{md5_hash}"
 
-    @property
+    @functools.cached_property
     def column_specs(self) -> tuple[ColumnPySpec, ...]:
         return tuple(
             column_py_spec(
@@ -608,6 +614,8 @@ def column_py_spec(  # noqa: C901, PLR0912
             | "bigserial"
         ):
             py_type = "int"
+        case "oid":
+            py_type = "int"
         case "float4" | "float8":
             py_type = "float"
         case "numeric":
@@ -635,7 +643,11 @@ def column_py_spec(  # noqa: C901, PLR0912
                 else "str"
             )
         case _:
-            logger.warning(f"Unknown SQL type: {column.type.name} ({column.name})")
+            warnings.warn(
+                f"Unknown SQL type: {db_type}, mapped to 'object'",
+                category=UnknownSQLTypeWarning,
+                stacklevel=2,
+            )
             py_type = "object"
 
     if column.is_array:
