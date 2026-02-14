@@ -48,6 +48,22 @@ def test_scanner_rejects_wrong_call_shape(test_project: ProjectBuilder) -> None:
         test_project.generate_no_import()
 
 
+def test_scanner_rejects_same_stmt_different_row_type(
+    test_project: ProjectBuilder,
+) -> None:
+    test_project.set_queries_source(
+        """from typing import Any
+def testdb_sql(q: str, **kwargs: Any) -> Any: ...
+
+q1 = testdb_sql("SELECT id, username FROM users", row_type="UserMini")
+q2 = testdb_sql("SELECT id, username FROM users")
+"""
+    )
+
+    with pytest.raises(ValueError, match=r"row_type conflict \(existing='UserMini'\)"):
+        test_project.generate_no_import()
+
+
 def test_sqlc_failure_returns_false(test_project: ProjectBuilder) -> None:
     test_project.add_query("bad_query", "SELEC FROM users")
     assert test_project.generate_no_import() is False

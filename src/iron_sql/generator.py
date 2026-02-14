@@ -87,6 +87,7 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
     target_package_path = src_path / f"{package_full_name.replace('.', '/')}.py"
 
     queries = list(find_all_queries(src_path, sql_fn_name))
+    validate_stmt_has_single_row_type(queries)
     queries = list({q.name: q for q in queries}.values())
 
     dsn_package = importlib.import_module(dsn_import_package)
@@ -724,3 +725,14 @@ def write_if_changed(path: Path, new_content: str) -> bool:
     path.write_text(new_content, encoding="utf-8")
     path.touch()
     return True
+
+
+def validate_stmt_has_single_row_type(queries: list[CodeQuery]) -> None:
+    row_type_by_stmt: dict[str, str | None] = {}
+    for query in queries:
+        if query.stmt in row_type_by_stmt:
+            if query.row_type != row_type_by_stmt[query.stmt]:
+                msg = f"row_type conflict (existing={row_type_by_stmt[query.stmt]!r})"
+                raise ValueError(msg)
+        else:
+            row_type_by_stmt[query.stmt] = query.row_type
