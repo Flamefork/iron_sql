@@ -1,5 +1,8 @@
+import datetime
+import ipaddress
 import warnings
 from enum import StrEnum
+from typing import get_args
 
 import pytest
 
@@ -262,3 +265,119 @@ async def test_table_column_enum_not_in_query_is_skipped(
     mod = test_project.generate()
 
     assert not hasattr(mod, "TestdbTableOnlyStatus")
+
+
+async def test_standard_type_mapping_network(test_project: ProjectBuilder) -> None:
+    inet_stmt = "SELECT '10.0.0.1/24'::inet as v"
+    cidr_stmt = "SELECT '10.0.0.0/24'::cidr as v"
+
+    test_project.add_query("get_inet", inet_stmt)
+    test_project.add_query("get_cidr", cidr_stmt)
+
+    mod = test_project.generate()
+
+    inet_query = mod.testdb_sql(inet_stmt)
+    inet_ret = type(inet_query).query_single_row.__annotations__["return"]
+    inet_args = {a for a in get_args(inet_ret) if a is not type(None)}
+    assert inet_args == {
+        ipaddress.IPv4Address,
+        ipaddress.IPv6Address,
+        ipaddress.IPv4Interface,
+        ipaddress.IPv6Interface,
+    }
+
+    inet_val = await inet_query.query_single_row()
+    assert isinstance(
+        inet_val,
+        (
+            ipaddress.IPv4Address,
+            ipaddress.IPv6Address,
+            ipaddress.IPv4Interface,
+            ipaddress.IPv6Interface,
+        ),
+    )
+
+    cidr_query = mod.testdb_sql(cidr_stmt)
+    cidr_ret = type(cidr_query).query_single_row.__annotations__["return"]
+    cidr_args = {a for a in get_args(cidr_ret) if a is not type(None)}
+    assert cidr_args == {ipaddress.IPv4Network, ipaddress.IPv6Network}
+
+    cidr_val = await cidr_query.query_single_row()
+    assert isinstance(cidr_val, (ipaddress.IPv4Network, ipaddress.IPv6Network))
+
+
+async def test_standard_type_mapping_interval(test_project: ProjectBuilder) -> None:
+    interval_stmt = "SELECT INTERVAL '1 day 2 hours' as v"
+
+    test_project.add_query("get_interval", interval_stmt)
+
+    mod = test_project.generate()
+
+    interval_query = mod.testdb_sql(interval_stmt)
+    interval_ret = type(interval_query).query_single_row.__annotations__["return"]
+    interval_ret_args = get_args(interval_ret)
+    interval_args = (
+        {a for a in interval_ret_args if a is not type(None)}
+        if interval_ret_args
+        else {interval_ret}
+    )
+    assert interval_args == {datetime.timedelta}
+
+    interval_val = await interval_query.query_single_row()
+    assert isinstance(interval_val, datetime.timedelta)
+
+
+async def test_standard_type_mapping_text_variants(
+    test_project: ProjectBuilder,
+) -> None:
+    bpchar_stmt = "SELECT 'x'::bpchar as v"
+    char_stmt = "SELECT 'y'::\"char\" as v"
+    name_stmt = "SELECT 'hello'::name as v"
+
+    test_project.add_query("get_bpchar", bpchar_stmt)
+    test_project.add_query("get_char", char_stmt)
+    test_project.add_query("get_name", name_stmt)
+
+    mod = test_project.generate()
+
+    for stmt in (bpchar_stmt, char_stmt, name_stmt):
+        q = mod.testdb_sql(stmt)
+        ret = type(q).query_single_row.__annotations__["return"]
+        ret_args = get_args(ret)
+        args = {a for a in ret_args if a is not type(None)} if ret_args else {ret}
+        assert args == {str}
+
+        val = await q.query_single_row()
+        assert isinstance(val, str)
+
+
+async def test_type_overrides_suppress_unknown_warning_and_override_annotation(
+    test_project: ProjectBuilder,
+) -> None:
+    extra_schema = """
+    CREATE DOMAIN custom_int AS integer;
+    """
+
+    await test_project.extend_schema(extra_schema)
+
+    stmt = "SELECT 1::custom_int as v"
+    test_project.add_query("get_custom_int", stmt)
+
+    with warnings.catch_warnings(record=True) as warning_messages:
+        warnings.simplefilter("always", UnknownSQLTypeWarning)
+        mod = test_project.generate(type_overrides={"custom_int": "int"})
+
+    unknown_type_warnings = [
+        w for w in warning_messages if issubclass(w.category, UnknownSQLTypeWarning)
+    ]
+    assert not unknown_type_warnings
+
+    q = mod.testdb_sql(stmt)
+    ret = type(q).query_single_row.__annotations__["return"]
+    ret_args = get_args(ret)
+    args = {a for a in ret_args if a is not type(None)} if ret_args else {ret}
+    assert args == {int}
+
+    val = await q.query_single_row()
+    assert val == 1
+    assert isinstance(val, int)

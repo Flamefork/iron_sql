@@ -190,7 +190,9 @@ class ProjectBuilder:
     def add_query(self, name: str, sql: str, **kwargs: Any) -> None:
         self.queries.append((name, sql, kwargs))
 
-    def generate_no_import(self) -> bool:
+    def generate_no_import(
+        self, *, type_overrides: dict[str, str] | None = None
+    ) -> bool:
         (self.app_dir / "config.py").write_text(
             f'DSN = "{self.dsn}"\n', encoding="utf-8"
         )
@@ -226,10 +228,11 @@ class ProjectBuilder:
             src_path=self.src_path,
             tempdir_path=self.src_path,
             sqlc_command=self.sqlc.sqlc_command(),
+            type_overrides=type_overrides,
         )
 
-    def generate(self) -> Any:
-        self.generate_no_import()
+    def generate(self, *, type_overrides: dict[str, str] | None = None) -> Any:
+        self.generate_no_import(type_overrides=type_overrides)
 
         importlib.invalidate_caches()
         sys.modules.pop(self.pkg_name, None)

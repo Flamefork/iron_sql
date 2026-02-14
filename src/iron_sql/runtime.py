@@ -124,8 +124,11 @@ def typed_scalar_row[T](
             if not not_null and val is None:
                 return None
             if not isinstance(val, typ):
-                if issubclass(typ, Enum):
-                    return typ(val)
+                try:
+                    if issubclass(typ, Enum):
+                        return typ(val)
+                except TypeError:
+                    pass
                 msg = f"Expected scalar of type {typ}, got {type(val)}"
                 raise TypeError(msg)
             return val

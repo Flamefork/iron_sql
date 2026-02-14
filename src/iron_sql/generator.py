@@ -25,13 +25,138 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(kw_only=True, frozen=True)
-class ColumnPySpec:
+class ColumnSpec:
     name: str
     table: str
+    py_type: str
+
+
+@dataclass(kw_only=True, frozen=True)
+class ParamSpec:
+    name: str
+    py_type: str
+    is_named: bool
     db_type: str
     not_null: bool
     is_array: bool
-    py_type: str
+
+    @property
+    def serialized_expr(self) -> str:
+        match self:
+            case ParamSpec(db_type="json", not_null=True):
+                msg = "Unsupported column type: json"
+                raise TypeError(msg)
+            case ParamSpec(db_type="jsonb", is_array=True):
+                msg = "Unsupported column type: jsonb[]"
+                raise TypeError(msg)
+            case ParamSpec(db_type="jsonb", not_null=True):
+                return f"pgjson.Jsonb({self.name})"
+            case ParamSpec(db_type="jsonb", not_null=False):
+                return f"pgjson.Jsonb({self.name}) if {self.name} is not None else None"
+            case _:
+                return self.name
+
+
+@dataclass(kw_only=True, frozen=True)
+class TypeResolver:
+    catalog: Catalog
+    package_name: str
+    to_pascal_fn: Callable[[str], str]
+    to_snake_fn: Callable[[str], str]
+    type_overrides: dict[str, str]
+
+    def column_spec(self, column: Column) -> ColumnSpec:
+        _, py_type = self._resolve(column)
+        return ColumnSpec(
+            name=column.name,
+            table=column.table.name if column.table else "unknown",
+            py_type=py_type,
+        )
+
+    def param_spec(self, column: Column, name: str, *, is_named: bool) -> ParamSpec:
+        db_type, py_type = self._resolve(column)
+        return ParamSpec(
+            name=name,
+            py_type=py_type,
+            is_named=is_named,
+            db_type=db_type,
+            not_null=column.not_null,
+            is_array=column.is_array,
+        )
+
+    def _resolve(self, column: Column) -> tuple[str, str]:  # noqa: C901, PLR0912
+        db_type = column.type.name.removeprefix("pg_catalog.")
+        if db_type in self.type_overrides:
+            py_type = self.type_overrides[db_type]
+        else:
+            match db_type:
+                case "bool" | "boolean":
+                    py_type = "bool"
+                case (
+                    "int2"
+                    | "int4"
+                    | "int8"
+                    | "smallint"
+                    | "integer"
+                    | "bigint"
+                    | "serial"
+                    | "bigserial"
+                ):
+                    py_type = "int"
+                case "oid":
+                    py_type = "int"
+                case "float4" | "float8":
+                    py_type = "float"
+                case "numeric":
+                    py_type = "decimal.Decimal"
+                case "varchar" | "text" | "bpchar" | "char" | "name":
+                    py_type = "str"
+                case "bytea":
+                    py_type = "bytes"
+                case "json" | "jsonb":
+                    py_type = "object"
+                case "inet":
+                    py_type = (
+                        "ipaddress.IPv4Address | ipaddress.IPv6Address | "
+                        "ipaddress.IPv4Interface | ipaddress.IPv6Interface"
+                    )
+                case "cidr":
+                    py_type = "ipaddress.IPv4Network | ipaddress.IPv6Network"
+                case "date":
+                    py_type = "datetime.date"
+                case "time" | "timetz":
+                    py_type = "datetime.time"
+                case "timestamp" | "timestamptz":
+                    py_type = "datetime.datetime"
+                case "interval":
+                    py_type = "datetime.timedelta"
+                case "uuid":
+                    py_type = "uuid.UUID"
+                case "any" | "anyelement":
+                    py_type = "object"
+                case enum if self.catalog.schema_by_ref(column.type).has_enum(enum):
+                    py_type = (
+                        self.to_pascal_fn(
+                            f"{self.package_name}_{self.to_snake_fn(enum)}"
+                        )
+                        if self.package_name
+                        else "str"
+                    )
+                case _:
+                    warnings.warn(
+                        f"Unknown SQL type: {db_type}, mapped to 'object'",
+                        category=UnknownSQLTypeWarning,
+                        stacklevel=1,
+                    )
+                    py_type = "object"
+
+        if column.is_array:
+            py_type = f"Sequence[{py_type}]"
+
+        if not column.not_null:
+            py_type += " | None"
+
+        return db_type, py_type
 
 
 class UnknownSQLTypeWarning(UserWarning):
@@ -56,8 +181,9 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
     package_full_name: str,
     dsn_import: str,
     application_name: str | None = None,
-    to_pascal_fn=alias_generators.to_pascal,
-    to_snake_fn=alias_generators.to_snake,
+    type_overrides: dict[str, str] | None = None,
+    to_pascal_fn: Callable[[str], str] = alias_generators.to_pascal,
+    to_snake_fn: Callable[[str], str] = alias_generators.to_snake,
     debug_path: Path | None = None,
     src_path: Path = Path(),
     sqlc_path: Path | None = None,
@@ -72,6 +198,8 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
         dsn_import: Import path to DSN string (e.g.,
             "myapp.config:CONFIG.db_url")
         application_name: Optional application name for connection pool
+        type_overrides: Optional mapping of DB type name (without "pg_catalog.")
+            to a Python type string used in generated annotations.
         to_pascal_fn: Function to convert names to PascalCase (default:
             pydantic's to_pascal)
         to_snake_fn: Function to convert names to snake_case (default:
@@ -113,13 +241,19 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
         logger.error("Error running SQLC:\n%s", sqlc_res.error)
         return False
 
+    resolver = TypeResolver(
+        catalog=sqlc_res.catalog,
+        package_name=package_name,
+        to_pascal_fn=to_pascal_fn,
+        to_snake_fn=to_snake_fn,
+        type_overrides=type_overrides or {},
+    )
+
     ordered_entities, result_types = map_entities(
-        package_name,
         sqlc_res.queries,
-        sqlc_res.catalog,
         sqlc_res.used_schemas(),
         queries,
-        to_pascal_fn,
+        resolver,
     )
 
     entities = [render_entity(e.name, e.column_specs) for e in ordered_entities]
@@ -139,16 +273,10 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
             q.text,
             package_name,
             [
-                (
-                    column_py_spec(
-                        p.column,
-                        sqlc_res.catalog,
-                        package_name,
-                        to_pascal_fn,
-                        to_snake_fn,
-                        p.number,
-                    ),
-                    p.column.is_named_param,
+                resolver.param_spec(
+                    p.column,
+                    p.column.name or f"param_{p.number}",
+                    is_named=p.column.is_named_param,
                 )
                 for p in q.params
             ],
@@ -217,6 +345,7 @@ def render_package(
 
 import datetime
 import decimal
+import ipaddress
 import uuid
 from collections.abc import AsyncIterator
 from collections.abc import Sequence
@@ -326,7 +455,7 @@ class {class_name}(StrEnum):
 
 def render_entity(
     name: str,
-    columns: tuple[ColumnPySpec, ...],
+    columns: tuple[ColumnSpec, ...],
 ) -> str:
     return f"""
 
@@ -337,60 +466,39 @@ class {name}:
     """.strip()
 
 
-def deduplicate_params(
-    params: list[tuple[ColumnPySpec, bool]],
-) -> list[tuple[ColumnPySpec, bool]]:
+def deduplicate_params(params: list[ParamSpec]) -> list[ParamSpec]:
     seen = defaultdict(int)
-    result: list[tuple[ColumnPySpec, bool]] = []
-    for column, is_named in params:
-        seen[column.name] += 1
+    result: list[ParamSpec] = []
+    for param in params:
+        seen[param.name] += 1
         new_name = (
-            f"{column.name}{seen[column.name]}"
-            if seen[column.name] > 1
-            else column.name
+            f"{param.name}{seen[param.name]}" if seen[param.name] > 1 else param.name
         )
-        new_column = dataclasses.replace(column, name=new_name)
-        result.append((new_column, is_named))
+        result.append(dataclasses.replace(param, name=new_name))
     return result
-
-
-def serialized_arg(column: ColumnPySpec) -> str:
-    match column:
-        case ColumnPySpec(db_type="json", not_null=True):
-            msg = "Unsupported column type: json"
-            raise TypeError(msg)
-        case ColumnPySpec(db_type="jsonb", is_array=True):
-            msg = "Unsupported column type: jsonb[]"
-            raise TypeError(msg)
-        case ColumnPySpec(db_type="jsonb", not_null=True, name=name):
-            return f"pgjson.Jsonb({name})"
-        case ColumnPySpec(db_type="jsonb", not_null=False, name=name):
-            return f"pgjson.Jsonb({name}) if {name} is not None else None"
-        case ColumnPySpec(name=name):
-            return name
 
 
 def render_query_class(
     query_name: str,
     stmt: str,
     package_name: str,
-    query_params: list[tuple[ColumnPySpec, bool]],
+    query_params: list[ParamSpec],
     result: str,
     columns_num: int,
 ) -> str:
     query_params = deduplicate_params(query_params)
 
-    match [column for column, _ in query_params]:
+    match query_params:
         case []:
             params_arg = "None"
-        case [column]:
-            params_arg = f"({serialized_arg(column)},)"
-        case columns:
-            params_arg = f"({', '.join(serialized_arg(column) for column in columns)})"
+        case [param]:
+            params_arg = f"({param.serialized_expr},)"
+        case params:
+            params_arg = f"({', '.join(p.serialized_expr for p in params)})"
 
-    query_fn_params = [f"{column.name}: {column.py_type}" for column, _ in query_params]
+    query_fn_params = [f"{p.name}: {p.py_type}" for p in query_params]
     first_named_param_idx = next(
-        (i for i, (_, is_named_param) in enumerate(query_params) if is_named_param), -1
+        (i for i, p in enumerate(query_params) if p.is_named), -1
     )
     if first_named_param_idx >= 0:
         query_fn_params.insert(first_named_param_idx, "*")
@@ -489,59 +597,45 @@ class CodeQuery:
 
 @dataclass(kw_only=True)
 class SQLEntity:
-    package_name: str
+    resolver: TypeResolver
     set_name: str | None
     table_name: str | None
     columns: list[Column]
-    catalog: Catalog = dataclasses.field(repr=False)
-    to_pascal_fn: Callable[[str], str]
-    to_snake_fn: Callable[[str], str] = inflection.underscore
 
     @property
     def name(self) -> str:
         if self.set_name:
             return self.set_name
         if self.table_name:
-            return self.to_pascal_fn(
-                f"{self.package_name}_{inflection.singularize(self.table_name)}"
+            return self.resolver.to_pascal_fn(
+                f"{self.resolver.package_name}_{inflection.singularize(self.table_name)}"
             )
         hash_base = repr(self.column_specs)
         md5_hash = hashlib.md5(hash_base.encode(), usedforsecurity=False).hexdigest()
         return f"QueryResult_{md5_hash}"
 
     @functools.cached_property
-    def column_specs(self) -> tuple[ColumnPySpec, ...]:
-        return tuple(
-            column_py_spec(
-                c, self.catalog, self.package_name, self.to_pascal_fn, self.to_snake_fn
-            )
-            for c in self.columns
-        )
+    def column_specs(self) -> tuple[ColumnSpec, ...]:
+        return tuple(self.resolver.column_spec(c) for c in self.columns)
 
 
 def map_entities(
-    package_name: str,
     queries_from_sqlc: list[Query],
-    catalog: Catalog,
     used_schemas: list[str],
     queries_from_code: list[CodeQuery],
-    to_pascal_fn: Callable[[str], str],
-    to_snake_fn: Callable[[str], str] = inflection.underscore,
-):
+    resolver: TypeResolver,
+) -> tuple[list[SQLEntity], dict[str, str]]:
     row_types = {q.name: q.row_type for q in queries_from_code}
 
     table_entities = [
         SQLEntity(
-            package_name=package_name,
+            resolver=resolver,
             set_name=None,
             table_name=t.rel.name,
             columns=t.columns,
-            catalog=catalog,
-            to_pascal_fn=to_pascal_fn,
-            to_snake_fn=to_snake_fn,
         )
         for sch in used_schemas
-        for t in catalog.schema_by_name(sch).tables
+        for t in resolver.catalog.schema_by_name(sch).tables
     ]
     specs_to_entities = {e.column_specs: e for e in table_entities}
 
@@ -555,13 +649,10 @@ def map_entities(
 
     query_result_entities = {
         q.name: SQLEntity(
-            package_name=package_name,
+            resolver=resolver,
             set_name=row_types[q.name],
             table_name=None,
             columns=q.columns,
-            catalog=catalog,
-            to_pascal_fn=to_pascal_fn,
-            to_snake_fn=to_snake_fn,
         )
         for q in queries_from_sqlc
         if len(q.columns) > 1
@@ -581,89 +672,12 @@ def map_entities(
         if len(q.columns) == 0:
             result_types[q.name] = "None"
         elif len(q.columns) == 1:
-            result_types[q.name] = column_py_spec(
-                q.columns[0], catalog, package_name, to_pascal_fn, to_snake_fn
-            ).py_type
+            result_types[q.name] = resolver.column_spec(q.columns[0]).py_type
         else:
-            column_spec = query_result_entities[q.name].column_specs
-            result_types[q.name] = unique_entities[column_spec].name
+            column_specs = query_result_entities[q.name].column_specs
+            result_types[q.name] = unique_entities[column_specs].name
 
     return ordered_entities, result_types
-
-
-def column_py_spec(  # noqa: C901, PLR0912
-    column: Column,
-    catalog: Catalog,
-    package_name: str,
-    to_pascal_fn: Callable[[str], str],
-    to_snake_fn: Callable[[str], str] = inflection.underscore,
-    number: int = 0,
-) -> ColumnPySpec:
-    db_type = column.type.name.removeprefix("pg_catalog.")
-    match db_type:
-        case "bool" | "boolean":
-            py_type = "bool"
-        case (
-            "int2"
-            | "int4"
-            | "int8"
-            | "smallint"
-            | "integer"
-            | "bigint"
-            | "serial"
-            | "bigserial"
-        ):
-            py_type = "int"
-        case "oid":
-            py_type = "int"
-        case "float4" | "float8":
-            py_type = "float"
-        case "numeric":
-            py_type = "decimal.Decimal"
-        case "varchar" | "text":
-            py_type = "str"
-        case "bytea":
-            py_type = "bytes"
-        case "json" | "jsonb":
-            py_type = "object"
-        case "date":
-            py_type = "datetime.date"
-        case "time" | "timetz":
-            py_type = "datetime.time"
-        case "timestamp" | "timestamptz":
-            py_type = "datetime.datetime"
-        case "uuid":
-            py_type = "uuid.UUID"
-        case "any" | "anyelement":
-            py_type = "object"
-        case enum if catalog.schema_by_ref(column.type).has_enum(enum):
-            py_type = (
-                to_pascal_fn(f"{package_name}_{to_snake_fn(enum)}")
-                if package_name
-                else "str"
-            )
-        case _:
-            warnings.warn(
-                f"Unknown SQL type: {db_type}, mapped to 'object'",
-                category=UnknownSQLTypeWarning,
-                stacklevel=2,
-            )
-            py_type = "object"
-
-    if column.is_array:
-        py_type = f"Sequence[{py_type}]"
-
-    if not column.not_null:
-        py_type += " | None"
-
-    return ColumnPySpec(
-        name=column.name or f"param_{number}",
-        table=column.table.name if column.table else "unknown",
-        db_type=db_type,
-        not_null=column.not_null,
-        is_array=column.is_array,
-        py_type=py_type,
-    )
 
 
 def find_fn_calls(
