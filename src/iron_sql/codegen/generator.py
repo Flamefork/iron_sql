@@ -14,12 +14,14 @@ from pathlib import Path
 import inflection
 from pydantic import alias_generators
 
-from iron_sql.sqlc import Catalog
-from iron_sql.sqlc import Column
-from iron_sql.sqlc import Enum
-from iron_sql.sqlc import Query
-from iron_sql.sqlc import SQLCResult
-from iron_sql.sqlc import run_sqlc
+from iron_sql.codegen.sqlc import Catalog
+from iron_sql.codegen.sqlc import Column
+from iron_sql.codegen.sqlc import Enum
+from iron_sql.codegen.sqlc import Query
+from iron_sql.codegen.sqlc import SQLCResult
+from iron_sql.codegen.sqlc import run_sqlc
+from iron_sql.codegen.util import indent_block
+from iron_sql.codegen.util import write_if_changed
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +51,7 @@ class ParamSpec:
             raise TypeError(msg)
 
         if self.json_type:
-            jt = self.json_type
-            return f"runtime.serialize_json_param({jt}, {self.name}, {self.db_type!r})"
+            return f"runtime.serialize_json_param({self.json_type}, {self.name}, {self.db_type!r})"  # noqa: E501
 
         match self.db_type:
             case "json":
@@ -417,20 +418,7 @@ def render_package(  # noqa: PLR0913, PLR0917
 
 # fmt: off
 # pyright: reportUnusedImport=false
-# ruff: noqa: A002
-# ruff: noqa: ARG001
-# ruff: noqa: C901
-# ruff: noqa: E303
-# ruff: noqa: E501
-# ruff: noqa: F401
-# ruff: noqa: FBT001
-# ruff: noqa: I001
-# ruff: noqa: N801
-# ruff: noqa: PLR0912
-# ruff: noqa: PLR0913
-# ruff: noqa: PLR0917
-# ruff: noqa: Q000
-# ruff: noqa: RUF100
+# ruff: noqa
 
 import datetime
 import decimal
@@ -835,23 +823,6 @@ def find_all_queries(src_path: Path, sql_fn_name: str) -> Iterator[CodeQuery]:
             file=relative_path,
             lineno=lineno,
         )
-
-
-def indent_block(block: str, indent: str) -> str:
-    return "\n".join(
-        indent + line if i > 0 and line.strip() else line
-        for i, line in enumerate(block.split("\n"))
-    )
-
-
-def write_if_changed(path: Path, new_content: str) -> bool:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    existing_content = path.read_text(encoding="utf-8") if path.exists() else None
-    if existing_content == new_content:
-        return False
-    path.write_text(new_content, encoding="utf-8")
-    path.touch()
-    return True
 
 
 def validate_stmt_has_single_row_type(queries: list[CodeQuery]) -> None:

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from iron_sql.sqlc import run_sqlc
+from iron_sql.codegen.sqlc import run_sqlc
 
 
 def test_run_sqlc_exclusive_args(tmp_path: Path) -> None:

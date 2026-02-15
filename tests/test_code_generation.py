@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from iron_sql import generate_sql_package
+from iron_sql.codegen import generate_sql_package
 from tests.conftest import ProjectBuilder
 
 

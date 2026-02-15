@@ -6,7 +6,7 @@ from typing import get_args
 
 import pytest
 
-from iron_sql import UnknownSQLTypeWarning
+from iron_sql.codegen import UnknownSQLTypeWarning
 from tests.conftest import ProjectBuilder
 
 

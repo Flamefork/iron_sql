@@ -21,6 +21,9 @@ install-deps:
 update-deps: && install-deps
     uv lock --upgrade
 
+generate-example:
+    uv run python example/generate.py
+
 release version:
     uv version {{ version }}
     git add --all

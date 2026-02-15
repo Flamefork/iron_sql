@@ -18,11 +18,13 @@ classifiers = [
 
 requires-python = ">=3.13"
 dependencies = [
-    "inflection>=0.5.1",
     "psycopg>=3.3.2",
     "psycopg-pool>=3.3.0",
     "pydantic>=2.12.4",
 ]
+
+[project.optional-dependencies]
+codegen = ["inflection>=0.5.1"]
 
 [project.urls]
 Homepage = "https://github.com/Flamefork/iron_sql"
@@ -35,6 +37,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "iron-sql[codegen]",
     "basedpyright>=1.31.7",
     "psycopg[binary]>=3.3.2",
     "pytest>=8.4.2",
@@ -46,6 +49,7 @@ dev = [
 ]
 
 [tool.pyright]
+ignore = ["example"]
 typeCheckingMode = "strict"
 reportUnknownArgumentType = "none"
 reportUnknownLambdaType = "none"
@@ -64,6 +68,7 @@ reportImplicitRelativeImport = true
 
 [tool.ruff]
 target-version = "py313"
+exclude = ["example"]
 
 [tool.ruff.format]
 preview = true

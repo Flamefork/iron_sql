@@ -14,7 +14,7 @@ import pytest
 from psycopg import sql
 from testcontainers.postgres import PostgresContainer
 
-from iron_sql import generate_sql_package
+from iron_sql.codegen import generate_sql_package
 from tests.sqlc_testcontainers import SqlcContainer
 
 # =============================================================================

@@ -189,15 +189,20 @@ name = "iron-sql"
 version = "0.2.5"
 source = { editable = "." }
 dependencies = [
-    { name = "inflection" },
     { name = "psycopg" },
     { name = "psycopg-pool" },
     { name = "pydantic" },
 ]
 
+[package.optional-dependencies]
+codegen = [
+    { name = "inflection" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "basedpyright" },
+    { name = "iron-sql", extra = ["codegen"] },
     { name = "psycopg", extra = ["binary"] },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -209,15 +214,17 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "inflection", specifier = ">=0.5.1" },
+    { name = "inflection", marker = "extra == 'codegen'", specifier = ">=0.5.1" },
     { name = "psycopg", specifier = ">=3.3.2" },
     { name = "psycopg-pool", specifier = ">=3.3.0" },
     { name = "pydantic", specifier = ">=2.12.4" },
 ]
+provides-extras = ["codegen"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "basedpyright", specifier = ">=1.31.7" },
+    { name = "iron-sql", extras = ["codegen"] },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.2" },
     { name = "pytest", specifier = ">=8.4.2" },
     { name = "pytest-asyncio", specifier = ">=1.2.0" },
