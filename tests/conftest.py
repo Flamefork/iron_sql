@@ -11,11 +11,11 @@ from typing import LiteralString
 
 import psycopg
 import pytest
+from iron_sql_dev import SqlcContainer
 from psycopg import sql
 from testcontainers.postgres import PostgresContainer
 
 from iron_sql.codegen import generate_sql_package
-from tests.sqlc_testcontainers import SqlcContainer
 
 # =============================================================================
 # PostgreSQL Container & Connection

@@ -2,6 +2,12 @@ version = 1
 revision = 3
 requires-python = ">=3.13"
 
+[manifest]
+members = [
+    "iron-sql",
+    "iron-sql-dev",
+]
+
 [[package]]
 name = "annotated-types"
 version = "0.7.0"
@@ -203,13 +209,13 @@ codegen = [
 dev = [
     { name = "basedpyright" },
     { name = "iron-sql", extra = ["codegen"] },
+    { name = "iron-sql-dev" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "pytest-randomly" },
     { name = "ruff" },
-    { name = "testcontainers" },
 ]
 
 [package.metadata]
@@ -225,14 +231,25 @@ provides-extras = ["codegen"]
 dev = [
     { name = "basedpyright", specifier = ">=1.31.7" },
     { name = "iron-sql", extras = ["codegen"] },
+    { name = "iron-sql-dev", editable = "dev" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.2" },
     { name = "pytest", specifier = ">=8.4.2" },
     { name = "pytest-asyncio", specifier = ">=1.2.0" },
     { name = "pytest-cov", specifier = ">=7.0.0" },
     { name = "pytest-randomly", specifier = ">=4.0.1" },
     { name = "ruff", specifier = ">=0.14.1" },
-    { name = "testcontainers", specifier = ">=4" },
 ]
+
+[[package]]
+name = "iron-sql-dev"
+version = "0.0.0"
+source = { editable = "dev" }
+dependencies = [
+    { name = "testcontainers" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "testcontainers", specifier = ">=4" }]
 
 [[package]]
 name = "nodejs-wheel-binaries"

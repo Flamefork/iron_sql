@@ -1,14 +1,11 @@
 import os
-import sys
 from pathlib import Path
 
 import psycopg
 from testcontainers.postgres import PostgresContainer
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from tests.sqlc_testcontainers import SqlcContainer
-
 from iron_sql.codegen import generate_sql_package
+from iron_sql_dev import SqlcContainer
 
 example_dir = Path(__file__).parent
 

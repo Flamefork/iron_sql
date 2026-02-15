@@ -17,12 +17,12 @@ jobs:
         uses: astral-sh/setup-uv@v6
       - name: Run lint
         run: just lint
+      - name: Run test
+        run: just test
       - name: Check example is up to date
         run: |
           just generate-example
           git diff --exit-code example/
-      - name: Run test
-        run: just test
   publish:
     if: startsWith(github.event.ref, 'refs/tags/v')
     needs: test

@@ -35,9 +35,16 @@ Issues = "https://github.com/Flamefork/iron_sql/issues"
 requires = ["uv_build>=0.9.4,<0.10.0"]
 build-backend = "uv_build"
 
+[tool.uv.workspace]
+members = ["dev"]
+
+[tool.uv.sources]
+iron-sql-dev = { workspace = true }
+
 [dependency-groups]
 dev = [
     "iron-sql[codegen]",
+    "iron-sql-dev",
     "basedpyright>=1.31.7",
     "psycopg[binary]>=3.3.2",
     "pytest>=8.4.2",
@@ -45,7 +52,6 @@ dev = [
     "pytest-cov>=7.0.0",
     "pytest-randomly>=4.0.1",
     "ruff>=0.14.1",
-    "testcontainers>=4",
 ]
 
 [tool.pyright]
