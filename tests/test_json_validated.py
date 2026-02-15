@@ -17,6 +17,21 @@ def test_json_validated_applies_validation() -> None:
     assert row.other == 42
 
 
+def test_json_validated_chains_existing_post_init() -> None:
+    @dataclass(kw_only=True)
+    @json_validated(metadata=UserMetadata)
+    class Row:
+        metadata: UserMetadata
+        extra: str = ""
+
+        def __post_init__(self) -> None:
+            self.extra = "post_init_ran"
+
+    row = Row(metadata={"key": "k", "value": "v"}, extra="ignored")  # type: ignore[reportArgumentType]
+    assert isinstance(row.metadata, UserMetadata)
+    assert row.extra == "post_init_ran"
+
+
 def test_json_validated_skips_none() -> None:
     @dataclass(kw_only=True)
     @json_validated(metadata=UserMetadata)

@@ -64,6 +64,21 @@ q2 = testdb_sql("SELECT id, username FROM users")
         test_project.generate_no_import()
 
 
+def test_same_stmt_same_row_type_is_allowed(
+    test_project: ProjectBuilder,
+) -> None:
+    test_project.set_queries_source(
+        """from typing import Any
+def testdb_sql(q: str, **kwargs: Any) -> Any: ...
+
+q1 = testdb_sql("SELECT id, username FROM users", row_type="UserMini")
+q2 = testdb_sql("SELECT id, username FROM users", row_type="UserMini")
+"""
+    )
+
+    assert test_project.generate_no_import() is True
+
+
 def test_sqlc_failure_returns_false(test_project: ProjectBuilder) -> None:
     test_project.add_query("bad_query", "SELEC FROM users")
     assert test_project.generate_no_import() is False

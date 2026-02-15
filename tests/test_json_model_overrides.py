@@ -174,6 +174,26 @@ async def test_scalar_nullable_override_none(test_project: ProjectBuilder) -> No
     assert result is None
 
 
+def test_invalid_config_key_without_dot(test_project: ProjectBuilder) -> None:
+    test_project.add_query("q", "SELECT 1")
+    with pytest.raises(ValueError, match=r"must be 'table\.column'"):
+        test_project.generate_no_import(
+            json_model_overrides={
+                "users_metadata": "tests.json_models:UserMetadata",
+            },
+        )
+
+
+def test_invalid_config_value_without_colon(test_project: ProjectBuilder) -> None:
+    test_project.add_query("q", "SELECT 1")
+    with pytest.raises(ValueError, match="must be 'module:Class'"):
+        test_project.generate_no_import(
+            json_model_overrides={
+                "users.metadata": "tests.json_models.UserMetadata",
+            },
+        )
+
+
 def test_invalid_config_nonexistent_table(test_project: ProjectBuilder) -> None:
     test_project.add_query("q", "SELECT 1")
     with pytest.raises(ValueError, match="table 'no_such_table' not found"):
