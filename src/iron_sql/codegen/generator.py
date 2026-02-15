@@ -1,6 +1,5 @@
 import ast
 import dataclasses
-import functools
 import hashlib
 import importlib
 import logging
@@ -44,12 +43,13 @@ class ParamSpec:
     is_array: bool
     json_type: str | None = None
 
-    @property
-    def serialized_expr(self) -> str:
+    def __post_init__(self) -> None:
         if self.db_type == "jsonb" and self.is_array:
             msg = "Unsupported column type: jsonb[]"
             raise TypeError(msg)
 
+    @property
+    def serialized_expr(self) -> str:
         if self.json_type:
             return f"runtime.serialize_json_param({self.json_type}, {self.name}, {self.db_type!r})"  # noqa: E501
 
@@ -64,6 +64,47 @@ class ParamSpec:
         if not self.not_null:
             return f"{expr} if {self.name} is not None else None"
         return expr
+
+
+class UnknownSQLTypeWarning(UserWarning):
+    pass
+
+
+_SQL_TYPE_MAP: dict[str, str] = {
+    "bool": "bool",
+    "boolean": "bool",
+    "int2": "int",
+    "int4": "int",
+    "int8": "int",
+    "smallint": "int",
+    "integer": "int",
+    "bigint": "int",
+    "serial": "int",
+    "bigserial": "int",
+    "oid": "int",
+    "float4": "float",
+    "float8": "float",
+    "numeric": "decimal.Decimal",
+    "varchar": "str",
+    "text": "str",
+    "bpchar": "str",
+    "char": "str",
+    "name": "str",
+    "bytea": "bytes",
+    "json": "object",
+    "jsonb": "object",
+    "inet": "ipaddress.IPv4Address | ipaddress.IPv6Address | ipaddress.IPv4Interface | ipaddress.IPv6Interface",  # noqa: E501
+    "cidr": "ipaddress.IPv4Network | ipaddress.IPv6Network",
+    "date": "datetime.date",
+    "time": "datetime.time",
+    "timetz": "datetime.time",
+    "timestamp": "datetime.datetime",
+    "timestamptz": "datetime.datetime",
+    "interval": "datetime.timedelta",
+    "uuid": "uuid.UUID",
+    "any": "object",
+    "anyelement": "object",
+}
 
 
 @dataclass(kw_only=True, frozen=True)
@@ -96,7 +137,7 @@ class TypeResolver:
             json_type=json_type,
         )
 
-    def _resolve(self, column: Column) -> tuple[str, str, str | None]:  # noqa: C901, PLR0912
+    def _resolve(self, column: Column) -> tuple[str, str, str | None]:
         db_type = column.type.name.removeprefix("pg_catalog.")
 
         json_type = None
@@ -108,67 +149,21 @@ class TypeResolver:
             py_type = json_type
         elif db_type in self.type_overrides:
             py_type = self.type_overrides[db_type]
+        elif db_type in _SQL_TYPE_MAP:
+            py_type = _SQL_TYPE_MAP[db_type]
+        elif self.catalog.schema_by_ref(column.type).has_enum(db_type):
+            py_type = (
+                self.to_pascal_fn(f"{self.package_name}_{self.to_snake_fn(db_type)}")
+                if self.package_name
+                else "str"
+            )
         else:
-            match db_type:
-                case "bool" | "boolean":
-                    py_type = "bool"
-                case (
-                    "int2"
-                    | "int4"
-                    | "int8"
-                    | "smallint"
-                    | "integer"
-                    | "bigint"
-                    | "serial"
-                    | "bigserial"
-                ):
-                    py_type = "int"
-                case "oid":
-                    py_type = "int"
-                case "float4" | "float8":
-                    py_type = "float"
-                case "numeric":
-                    py_type = "decimal.Decimal"
-                case "varchar" | "text" | "bpchar" | "char" | "name":
-                    py_type = "str"
-                case "bytea":
-                    py_type = "bytes"
-                case "json" | "jsonb":
-                    py_type = "object"
-                case "inet":
-                    py_type = (
-                        "ipaddress.IPv4Address | ipaddress.IPv6Address | "
-                        "ipaddress.IPv4Interface | ipaddress.IPv6Interface"
-                    )
-                case "cidr":
-                    py_type = "ipaddress.IPv4Network | ipaddress.IPv6Network"
-                case "date":
-                    py_type = "datetime.date"
-                case "time" | "timetz":
-                    py_type = "datetime.time"
-                case "timestamp" | "timestamptz":
-                    py_type = "datetime.datetime"
-                case "interval":
-                    py_type = "datetime.timedelta"
-                case "uuid":
-                    py_type = "uuid.UUID"
-                case "any" | "anyelement":
-                    py_type = "object"
-                case enum if self.catalog.schema_by_ref(column.type).has_enum(enum):
-                    py_type = (
-                        self.to_pascal_fn(
-                            f"{self.package_name}_{self.to_snake_fn(enum)}"
-                        )
-                        if self.package_name
-                        else "str"
-                    )
-                case _:
-                    warnings.warn(
-                        f"Unknown SQL type: {db_type}, mapped to 'object'",
-                        category=UnknownSQLTypeWarning,
-                        stacklevel=1,
-                    )
-                    py_type = "object"
+            warnings.warn(
+                f"Unknown SQL type: {db_type}, mapped to 'object'",
+                category=UnknownSQLTypeWarning,
+                stacklevel=1,
+            )
+            py_type = "object"
 
         if column.is_array:
             py_type = f"Sequence[{py_type}]"
@@ -179,11 +174,7 @@ class TypeResolver:
         return db_type, py_type, json_type
 
 
-class UnknownSQLTypeWarning(UserWarning):
-    pass
-
-
-def _collect_used_enums(sqlc_res: SQLCResult) -> set[tuple[str, str]]:
+def collect_used_enums(sqlc_res: SQLCResult) -> set[tuple[str, str]]:
     return {
         (schema.name, col.type.name)
         for col in (
@@ -341,7 +332,7 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
 
     entities = [render_entity(e.name, e.column_specs) for e in ordered_entities]
 
-    used_enums = _collect_used_enums(sqlc_res)
+    used_enums = collect_used_enums(sqlc_res)
 
     enums = [
         render_enum_class(e, package_name, to_pascal_fn, to_snake_fn)
@@ -667,7 +658,7 @@ def render_query_dict_entry(query_name: str, stmt: str) -> str:
     return f"{stmt!r}: {query_name}"
 
 
-@dataclass(kw_only=True)
+@dataclass(kw_only=True, frozen=True)
 class CodeQuery:
     stmt: str
     row_type: str | None
@@ -684,12 +675,12 @@ class CodeQuery:
         return f"{self.file}:{self.lineno}"
 
 
-@dataclass(kw_only=True)
+@dataclass(kw_only=True, frozen=True)
 class SQLEntity:
     resolver: TypeResolver
     set_name: str | None
     table_name: str | None
-    columns: list[Column]
+    columns: tuple[Column, ...]
 
     @property
     def name(self) -> str:
@@ -703,14 +694,14 @@ class SQLEntity:
         md5_hash = hashlib.md5(hash_base.encode(), usedforsecurity=False).hexdigest()
         return f"QueryResult_{md5_hash}"
 
-    @functools.cached_property
+    @property
     def column_specs(self) -> tuple[ColumnSpec, ...]:
         return tuple(self.resolver.column_spec(c) for c in self.columns)
 
 
 def map_entities(
-    queries_from_sqlc: list[Query],
-    used_schemas: list[str],
+    queries_from_sqlc: tuple[Query, ...],
+    used_schemas: tuple[str, ...],
     queries_from_code: list[CodeQuery],
     resolver: TypeResolver,
 ) -> tuple[list[SQLEntity], dict[str, str]]:

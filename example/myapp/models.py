@@ -1,4 +1,5 @@
 from pydantic import BaseModel
+from pydantic import Field
 
 
 class ProjectSettings(BaseModel):
@@ -7,5 +8,5 @@ class ProjectSettings(BaseModel):
 
 
 class TaskMetadata(BaseModel):
-    tags: list[str] = []
+    tags: list[str] = Field(default_factory=list)
     estimated_hours: float | None = None

@@ -83,7 +83,7 @@ def test_run_sqlc_no_queries() -> None:
             queries=[],
             dsn="postgres://",
         )
-        assert result.queries == []
-        assert result.catalog.schemas == []
+        assert result.queries == ()
+        assert result.catalog.schemas == ()
     finally:
         schema_path.unlink()

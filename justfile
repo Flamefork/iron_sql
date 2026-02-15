@@ -1,6 +1,3 @@
-test +args="":
-    uv run pytest -vv --color=yes --showlocals '{{ args }}'
-
 format:
     uv run ruff format .
     uv run ruff check . --fix || true
@@ -10,16 +7,13 @@ lint:
     uv run ruff check .
     uv run basedpyright
 
+test +args="":
+    uv run pytest -vv --color=yes --showlocals '{{ args }}'
+
 coverage:
     rm -rf .coverage/*
     uv run pytest --cov --cov-report=html
     open .coverage/htmlcov/index.html
-
-install-deps:
-    uv sync
-
-update-deps: && install-deps
-    uv lock --upgrade
 
 generate-example:
     uv run python example/generate.py

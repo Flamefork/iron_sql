@@ -1,3 +1,4 @@
+import types
 from collections.abc import AsyncIterator
 from collections.abc import Callable
 from collections.abc import Sequence
@@ -18,7 +19,7 @@ from pydantic import TypeAdapter
 _adapter_cache: dict[object, TypeAdapter[object]] = {}
 
 
-def _get_adapter(typ: object) -> TypeAdapter[object]:
+def get_adapter(typ: object) -> TypeAdapter[object]:
     adapter = _adapter_cache.get(typ)
     if adapter is None:
         adapter = TypeAdapter(typ)
@@ -54,7 +55,12 @@ class ConnectionPool:
     async def __aenter__(self) -> Self:
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: types.TracebackType | None,
+    ) -> None:
         await self.close()
 
     async def await_connections(self) -> None:
@@ -101,7 +107,7 @@ class ConnectionPool:
 def validate_json_field(typ: object, value: object) -> object:
     if value is None:
         return None
-    adapter = _get_adapter(typ)
+    adapter = get_adapter(typ)
     if isinstance(value, str | bytes):
         return adapter.validate_json(value)
     return adapter.validate_python(value)
@@ -109,7 +115,11 @@ def validate_json_field(typ: object, value: object) -> object:
 
 def json_validated(**json_fields: object):
     def decorator[T](cls: type[T]) -> type[T]:
+        original = getattr(cls, "__post_init__", None)
+
         def __post_init__(self: object) -> None:  # noqa: N807
+            if original is not None:
+                original(self)
             for name, typ in json_fields.items():
                 setattr(self, name, validate_json_field(typ, getattr(self, name)))
 
@@ -122,7 +132,7 @@ def json_validated(**json_fields: object):
 def serialize_json_param(typ: object, value: object, db_type: str) -> object:
     if value is None:
         return None
-    adapter = _get_adapter(typ)
+    adapter = get_adapter(typ)
     match db_type:
         case "json":
             return pgjson.Json(adapter.dump_python(value, mode="json"))
@@ -182,11 +192,8 @@ def typed_scalar_row[T](
             if validate:
                 return validate(val)
             if not isinstance(val, typ):
-                try:
-                    if issubclass(typ, Enum):
-                        return typ(val)
-                except TypeError:
-                    pass
+                if issubclass(typ, Enum):
+                    return typ(val)
                 msg = f"Expected scalar of type {typ}, got {type(val)}"
                 raise TypeError(msg)
             return val
