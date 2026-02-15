@@ -29,6 +29,7 @@ class ColumnSpec:
     name: str
     table: str
     py_type: str
+    json_type: str | None = None
 
 
 @dataclass(kw_only=True, frozen=True)
@@ -39,22 +40,29 @@ class ParamSpec:
     db_type: str
     not_null: bool
     is_array: bool
+    json_type: str | None = None
 
     @property
     def serialized_expr(self) -> str:
-        match self:
-            case ParamSpec(db_type="json", not_null=True):
-                msg = "Unsupported column type: json"
-                raise TypeError(msg)
-            case ParamSpec(db_type="jsonb", is_array=True):
-                msg = "Unsupported column type: jsonb[]"
-                raise TypeError(msg)
-            case ParamSpec(db_type="jsonb", not_null=True):
-                return f"pgjson.Jsonb({self.name})"
-            case ParamSpec(db_type="jsonb", not_null=False):
-                return f"pgjson.Jsonb({self.name}) if {self.name} is not None else None"
+        if self.db_type == "jsonb" and self.is_array:
+            msg = "Unsupported column type: jsonb[]"
+            raise TypeError(msg)
+
+        if self.json_type:
+            jt = self.json_type
+            return f"runtime.serialize_json_param({jt}, {self.name}, {self.db_type!r})"
+
+        match self.db_type:
+            case "json":
+                expr = f"pgjson.Json({self.name})"
+            case "jsonb":
+                expr = f"pgjson.Jsonb({self.name})"
             case _:
                 return self.name
+
+        if not self.not_null:
+            return f"{expr} if {self.name} is not None else None"
+        return expr
 
 
 @dataclass(kw_only=True, frozen=True)
@@ -64,17 +72,19 @@ class TypeResolver:
     to_pascal_fn: Callable[[str], str]
     to_snake_fn: Callable[[str], str]
     type_overrides: dict[str, str]
+    json_col_overrides: dict[tuple[str, str], str]
 
     def column_spec(self, column: Column) -> ColumnSpec:
-        _, py_type = self._resolve(column)
+        _, py_type, json_type = self._resolve(column)
         return ColumnSpec(
             name=column.name,
             table=column.table.name if column.table else "unknown",
             py_type=py_type,
+            json_type=json_type,
         )
 
     def param_spec(self, column: Column, name: str, *, is_named: bool) -> ParamSpec:
-        db_type, py_type = self._resolve(column)
+        db_type, py_type, json_type = self._resolve(column)
         return ParamSpec(
             name=name,
             py_type=py_type,
@@ -82,11 +92,20 @@ class TypeResolver:
             db_type=db_type,
             not_null=column.not_null,
             is_array=column.is_array,
+            json_type=json_type,
         )
 
-    def _resolve(self, column: Column) -> tuple[str, str]:  # noqa: C901, PLR0912
+    def _resolve(self, column: Column) -> tuple[str, str, str | None]:  # noqa: C901, PLR0912
         db_type = column.type.name.removeprefix("pg_catalog.")
-        if db_type in self.type_overrides:
+
+        json_type = None
+        if column.table is not None:
+            col_name = column.original_name or column.name
+            json_type = self.json_col_overrides.get((column.table.name, col_name))
+
+        if json_type:
+            py_type = json_type
+        elif db_type in self.type_overrides:
             py_type = self.type_overrides[db_type]
         else:
             match db_type:
@@ -156,7 +175,7 @@ class TypeResolver:
         if not column.not_null:
             py_type += " | None"
 
-        return db_type, py_type
+        return db_type, py_type, json_type
 
 
 class UnknownSQLTypeWarning(UserWarning):
@@ -182,6 +201,7 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
     dsn_import: str,
     application_name: str | None = None,
     type_overrides: dict[str, str] | None = None,
+    json_model_overrides: dict[str, str] | None = None,
     to_pascal_fn: Callable[[str], str] = alias_generators.to_pascal,
     to_snake_fn: Callable[[str], str] = alias_generators.to_snake,
     debug_path: Path | None = None,
@@ -200,18 +220,24 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
         application_name: Optional application name for connection pool
         type_overrides: Optional mapping of DB type name (without "pg_catalog.")
             to a Python type string used in generated annotations.
+        json_model_overrides: Optional mapping of "table.column" to
+            "module:ClassName" for JSON model serialization/deserialization.
         to_pascal_fn: Function to convert names to PascalCase (default:
             pydantic's to_pascal)
         to_snake_fn: Function to convert names to snake_case (default:
             pydantic's to_snake)
         debug_path: Optional path to save sqlc inputs for inspection
         src_path: Base source path for scanning queries (default: Path())
-        sqlc_path: Optional path to sqlc binary if not in PATH
+        sqlc_path: Optional path to sqlc config directory
         tempdir_path: Optional path for temporary file generation
         sqlc_command: Optional command prefix to run sqlc
 
     Returns:
         True if the package was generated or modified, False otherwise
+
+    Raises:
+        ValueError: If json_model_overrides keys/values are malformed,
+            reference non-existent tables/columns, or target non-JSON columns.
     """
     dsn_import_package, dsn_import_path = dsn_import.split(":")
 
@@ -241,12 +267,68 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
         logger.error("Error running SQLC:\n%s", sqlc_res.error)
         return False
 
+    json_import_block = ""
+    json_col_overrides: dict[tuple[str, str], str] = {}
+
+    if json_model_overrides:
+        json_compatible_types = {"json", "jsonb", "text", "varchar"}
+        col_types = {
+            (table.rel.name, column.name): column.type.name.removeprefix("pg_catalog.")
+            for schema in sqlc_res.catalog.schemas
+            for table in schema.tables
+            for column in table.columns
+        }
+        tables = {table for table, _ in col_types}
+
+        parsed: dict[tuple[str, str], tuple[str, str]] = {}
+        for key, import_path in json_model_overrides.items():
+            table_name, sep, col_name = key.partition(".")
+            if not sep:
+                msg = f"json_model_overrides key must be 'table.column', got: {key!r}"
+                raise ValueError(msg)
+            if table_name not in tables:
+                msg = f"json_model_overrides: table {table_name!r} not found in catalog"
+                raise ValueError(msg)
+            if (table_name, col_name) not in col_types:
+                msg = (
+                    f"json_model_overrides: column {col_name!r} "
+                    f"not found in table {table_name!r}"
+                )
+                raise ValueError(msg)
+
+            db_type = col_types[table_name, col_name]
+            if db_type not in json_compatible_types:
+                msg = (
+                    f"json_model_overrides: column "
+                    f"{table_name}.{col_name} has type "
+                    f"{db_type!r}, expected one of "
+                    f"{json_compatible_types}"
+                )
+                raise ValueError(msg)
+
+            module_path, sep, class_name = import_path.partition(":")
+            if not sep:
+                msg = (
+                    "json_model_overrides value must be "
+                    f"'module:Class', got: {import_path!r}"
+                )
+                raise ValueError(msg)
+
+            parsed[table_name, col_name] = (module_path, class_name)
+
+        modules = sorted({module for module, _ in parsed.values()})
+        json_import_block = "\n" + "\n".join(f"import {m}" for m in modules)
+        json_col_overrides = {
+            key: f"{module}.{cls}" for key, (module, cls) in parsed.items()
+        }
+
     resolver = TypeResolver(
         catalog=sqlc_res.catalog,
         package_name=package_name,
         to_pascal_fn=to_pascal_fn,
         to_snake_fn=to_snake_fn,
         type_overrides=type_overrides or {},
+        json_col_overrides=json_col_overrides,
     )
 
     ordered_entities, result_types = map_entities(
@@ -282,6 +364,11 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
             ],
             result_types[q.name],
             len(q.columns),
+            (
+                resolver.column_spec(q.columns[0]).json_type
+                if len(q.columns) == 1
+                else None
+            ),
         )
         for q in sqlc_res.queries
     ]
@@ -303,6 +390,7 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
         sorted(query_overloads),
         sorted(query_dict_entries),
         application_name,
+        json_import_block,
     )
     changed = write_if_changed(target_package_path, new_content + "\n")
     if changed:
@@ -310,7 +398,7 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
     return changed
 
 
-def render_package(
+def render_package(  # noqa: PLR0913, PLR0917
     dsn_import_package: str,
     dsn_import_path: str,
     package_name: str,
@@ -321,6 +409,7 @@ def render_package(
     query_overloads: list[str],
     query_dict_entries: list[str],
     application_name: str | None = None,
+    json_import_block: str = "",
 ):
     return f"""
 
@@ -363,6 +452,7 @@ from psycopg.types import json as pgjson
 from iron_sql import runtime
 
 from {dsn_import_package} import {dsn_import_path.split(".", maxsplit=1)[0]}
+{json_import_block}
 
 {package_name.upper()}_POOL = runtime.ConnectionPool(
     {dsn_import_path},
@@ -453,15 +543,19 @@ class {class_name}(StrEnum):
     """.strip()
 
 
-def render_entity(
-    name: str,
-    columns: tuple[ColumnSpec, ...],
-) -> str:
+def render_entity(name: str, columns: tuple[ColumnSpec, ...]) -> str:
+    fields = "\n    ".join(f"{c.name}: {c.py_type}" for c in columns)
+    json_cols = [(c.name, c.json_type) for c in columns if c.json_type]
+    validated = ""
+    if json_cols:
+        args = ", ".join(f"{n}={jt}" for n, jt in json_cols)
+        validated = f"\n@runtime.json_validated({args})"
+
     return f"""
 
-@dataclass(kw_only=True)
+@dataclass(kw_only=True){validated}
 class {name}:
-    {"\n    ".join(f"{c.name}: {c.py_type}" for c in columns)}
+    {fields}
 
     """.strip()
 
@@ -485,6 +579,7 @@ def render_query_class(
     query_params: list[ParamSpec],
     result: str,
     columns_num: int,
+    scalar_json_type: str | None = None,
 ) -> str:
     query_params = deduplicate_params(query_params)
 
@@ -509,10 +604,16 @@ def render_query_class(
     if columns_num == 0:
         row_factory = "psycopg.rows.scalar_row"
     elif columns_num == 1:
-        if result.endswith(" | None"):
-            row_factory = f"runtime.typed_scalar_row({base_result}, not_null=False)"
-        else:
-            row_factory = f"runtime.typed_scalar_row({base_result}, not_null=True)"
+        not_null_str = "True" if not result.endswith(" | None") else "False"
+        validate_arg = (
+            f", validate=lambda _v: runtime.validate_json_field({scalar_json_type}, _v)"
+            if scalar_json_type
+            else ""
+        )
+        row_factory = (
+            f"runtime.typed_scalar_row"
+            f"({base_result}, not_null={not_null_str}{validate_arg})"
+        )
     else:
         row_factory = f"psycopg.rows.class_row({result})"
 

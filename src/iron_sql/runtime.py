@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from collections.abc import Callable
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -11,6 +12,18 @@ from typing import overload
 import psycopg
 import psycopg.rows
 import psycopg_pool
+from psycopg.types import json as pgjson
+from pydantic import TypeAdapter
+
+_adapter_cache: dict[object, TypeAdapter[object]] = {}
+
+
+def _get_adapter(typ: object) -> TypeAdapter[object]:
+    adapter = _adapter_cache.get(typ)
+    if adapter is None:
+        adapter = TypeAdapter(typ)
+        _adapter_cache[typ] = adapter
+    return adapter
 
 
 class NoRowsError(Exception):
@@ -85,6 +98,40 @@ class ConnectionPool:
                 context_var.reset(token)
 
 
+def validate_json_field(typ: object, value: object) -> object:
+    if value is None:
+        return None
+    adapter = _get_adapter(typ)
+    if isinstance(value, str | bytes):
+        return adapter.validate_json(value)
+    return adapter.validate_python(value)
+
+
+def json_validated(**json_fields: object):
+    def decorator[T](cls: type[T]) -> type[T]:
+        def __post_init__(self: object) -> None:  # noqa: N807
+            for name, typ in json_fields.items():
+                setattr(self, name, validate_json_field(typ, getattr(self, name)))
+
+        cls.__post_init__ = __post_init__  # type: ignore[attr-defined]
+        return cls
+
+    return decorator
+
+
+def serialize_json_param(typ: object, value: object, db_type: str) -> object:
+    if value is None:
+        return None
+    adapter = _get_adapter(typ)
+    match db_type:
+        case "json":
+            return pgjson.Json(adapter.dump_python(value, mode="json"))
+        case "jsonb":
+            return pgjson.Jsonb(adapter.dump_python(value, mode="json"))
+        case _:
+            return adapter.dump_json(value).decode()
+
+
 def get_one_row[T](rows: list[T]) -> T:
     if len(rows) == 0:
         raise NoRowsError
@@ -103,26 +150,37 @@ def get_one_row_or_none[T](rows: list[T]) -> T | None:
 
 @overload
 def typed_scalar_row[T](
-    typ: type[T], *, not_null: Literal[True]
+    typ: type[T],
+    *,
+    not_null: Literal[True],
+    validate: Callable[[object], T] | None = None,
 ) -> psycopg.rows.BaseRowFactory[T]: ...
 
 
 @overload
 def typed_scalar_row[T](
-    typ: type[T], *, not_null: Literal[False]
+    typ: type[T],
+    *,
+    not_null: Literal[False],
+    validate: Callable[[object], T] | None = None,
 ) -> psycopg.rows.BaseRowFactory[T | None]: ...
 
 
 def typed_scalar_row[T](
-    typ: type[T], *, not_null: bool
+    typ: type[T], *, not_null: bool, validate: Callable[[object], T] | None = None
 ) -> psycopg.rows.BaseRowFactory[T | None]:
     def typed_scalar_row_(cursor) -> psycopg.rows.RowMaker[T | None]:
         scalar_row_ = psycopg.rows.scalar_row(cursor)
 
         def typed_scalar_row__(values: Sequence[Any]) -> T | None:
             val = scalar_row_(values)
-            if not not_null and val is None:
+            if val is None:
+                if not_null:
+                    msg = "Expected non-null value, got None"
+                    raise TypeError(msg)
                 return None
+            if validate:
+                return validate(val)
             if not isinstance(val, typ):
                 try:
                     if issubclass(typ, Enum):

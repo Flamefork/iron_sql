@@ -83,12 +83,11 @@ def test_result_shapes_validation_error_one_col(test_project: ProjectBuilder) ->
         test_project.generate_no_import()
 
 
-def test_unsupported_param_types_json(test_project: ProjectBuilder) -> None:
+def test_json_param_generates_successfully(test_project: ProjectBuilder) -> None:
     test_project.add_query(
-        "bad_json", "INSERT INTO json_payloads (payload) VALUES ($1)"
+        "insert_json", "INSERT INTO json_payloads (payload) VALUES ($1)"
     )
-    with pytest.raises(TypeError, match="Unsupported column type: json"):
-        test_project.generate_no_import()
+    assert test_project.generate_no_import() is True
 
 
 def test_unsupported_param_types_array(test_project: ProjectBuilder) -> None:
