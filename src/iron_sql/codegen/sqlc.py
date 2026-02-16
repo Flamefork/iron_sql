@@ -4,18 +4,23 @@ import shutil
 import subprocess  # noqa: S404
 import tempfile
 import textwrap
+from collections.abc import Sequence
 from pathlib import Path
 
 import pydantic
+from pydantic import ConfigDict
 
 
 class CatalogReference(pydantic.BaseModel):
+    model_config = ConfigDict(frozen=True)
     catalog: str
     schema_name: str = pydantic.Field(..., alias="schema")
     name: str
 
 
 class Column(pydantic.BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     name: str
     not_null: bool
     is_array: bool
@@ -35,37 +40,47 @@ class Column(pydantic.BaseModel):
 
 
 class Table(pydantic.BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     rel: CatalogReference
-    columns: list[Column]
+    columns: tuple[Column, ...]
     comment: str
 
 
 class Enum(pydantic.BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     name: str
-    vals: list[str]
+    vals: tuple[str, ...]
     comment: str
 
 
 class CompositeType(pydantic.BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     name: str
     comment: str
 
 
 class Schema(pydantic.BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     comment: str
     name: str
-    tables: list[Table]
-    enums: list[Enum]
-    composite_types: list[CompositeType]
+    tables: tuple[Table, ...]
+    enums: tuple[Enum, ...]
+    composite_types: tuple[CompositeType, ...]
 
     def has_enum(self, name: str) -> bool:
         return any(e.name == name for e in self.enums)
 
 
 class Catalog(pydantic.BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     default_schema: str
     name: str
-    schemas: list[Schema]
+    schemas: tuple[Schema, ...]
 
     def schema_by_name(self, name: str) -> Schema:
         for schema in self.schemas:
@@ -79,24 +94,30 @@ class Catalog(pydantic.BaseModel):
 
 
 class QueryParameter(pydantic.BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     number: int
     column: Column
 
 
 class Query(pydantic.BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     text: str
     name: str
     cmd: str
-    columns: list[Column]
-    params: list[QueryParameter]
+    columns: tuple[Column, ...]
+    params: tuple[QueryParameter, ...]
 
 
 class SQLCResult(pydantic.BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     error: str | None = None
     catalog: Catalog
-    queries: list[Query]
+    queries: tuple[Query, ...]
 
-    def used_schemas(self) -> list[str]:
+    def used_schemas(self) -> tuple[str, ...]:
         result = {
             c.table.schema_name
             for q in self.queries
@@ -107,10 +128,10 @@ class SQLCResult(pydantic.BaseModel):
             result.remove("")
             result.add(self.catalog.default_schema)
         catalog_schema_names = {s.name for s in self.catalog.schemas}
-        return [s for s in result if s in catalog_schema_names]
+        return tuple(s for s in result if s in catalog_schema_names)
 
 
-def _resolve_sqlc_command(
+def resolve_sqlc_command(
     sqlc_path: Path | None,
     sqlc_command: list[str] | None,
 ) -> list[str]:
@@ -138,7 +159,7 @@ def _resolve_sqlc_command(
 
 def run_sqlc(
     schema_path: Path,
-    queries: list[tuple[str, str]],
+    queries: Sequence[tuple[str, str]],
     *,
     dsn: str | None,
     debug_path: Path | None = None,
@@ -152,12 +173,12 @@ def run_sqlc(
 
     if not queries:
         return SQLCResult(
-            catalog=Catalog(default_schema="", name="", schemas=[]),
-            queries=[],
+            catalog=Catalog(default_schema="", name="", schemas=()),
+            queries=(),
         )
 
     queries = list({q[0]: q for q in queries}.values())
-    cmd_prefix = _resolve_sqlc_command(sqlc_path, sqlc_command)
+    cmd_prefix = resolve_sqlc_command(sqlc_path, sqlc_command)
 
     with tempfile.TemporaryDirectory(
         dir=str(tempdir_path) if tempdir_path else None
@@ -211,8 +232,8 @@ def run_sqlc(
         if not json_out_path.exists():
             return SQLCResult(
                 error=sqlc_run_result.stderr.decode().strip(),
-                catalog=Catalog(default_schema="", name="", schemas=[]),
-                queries=[],
+                catalog=Catalog(default_schema="", name="", schemas=()),
+                queries=(),
             )
         return SQLCResult.model_validate_json(json_out_path.read_text(encoding="utf-8"))
 

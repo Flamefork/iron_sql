@@ -11,11 +11,11 @@ from typing import LiteralString
 
 import psycopg
 import pytest
+from iron_sql_dev import SqlcContainer
 from psycopg import sql
 from testcontainers.postgres import PostgresContainer
 
-from iron_sql import generate_sql_package
-from tests.sqlc_testcontainers import SqlcContainer
+from iron_sql.codegen import generate_sql_package
 
 # =============================================================================
 # PostgreSQL Container & Connection
@@ -190,7 +190,12 @@ class ProjectBuilder:
     def add_query(self, name: str, sql: str, **kwargs: Any) -> None:
         self.queries.append((name, sql, kwargs))
 
-    def generate_no_import(self) -> bool:
+    def generate_no_import(
+        self,
+        *,
+        type_overrides: dict[str, str] | None = None,
+        json_model_overrides: dict[str, str] | None = None,
+    ) -> bool:
         (self.app_dir / "config.py").write_text(
             f'DSN = "{self.dsn}"\n', encoding="utf-8"
         )
@@ -226,10 +231,20 @@ class ProjectBuilder:
             src_path=self.src_path,
             tempdir_path=self.src_path,
             sqlc_command=self.sqlc.sqlc_command(),
+            type_overrides=type_overrides,
+            json_model_overrides=json_model_overrides,
         )
 
-    def generate(self) -> Any:
-        self.generate_no_import()
+    def generate(
+        self,
+        *,
+        type_overrides: dict[str, str] | None = None,
+        json_model_overrides: dict[str, str] | None = None,
+    ) -> Any:
+        self.generate_no_import(
+            type_overrides=type_overrides,
+            json_model_overrides=json_model_overrides,
+        )
 
         importlib.invalidate_caches()
         sys.modules.pop(self.pkg_name, None)

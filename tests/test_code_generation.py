@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from iron_sql import generate_sql_package
+from iron_sql.codegen import generate_sql_package
 from tests.conftest import ProjectBuilder
 
 
@@ -48,6 +48,37 @@ def test_scanner_rejects_wrong_call_shape(test_project: ProjectBuilder) -> None:
         test_project.generate_no_import()
 
 
+def test_scanner_rejects_same_stmt_different_row_type(
+    test_project: ProjectBuilder,
+) -> None:
+    test_project.set_queries_source(
+        """from typing import Any
+def testdb_sql(q: str, **kwargs: Any) -> Any: ...
+
+q1 = testdb_sql("SELECT id, username FROM users", row_type="UserMini")
+q2 = testdb_sql("SELECT id, username FROM users")
+"""
+    )
+
+    with pytest.raises(ValueError, match=r"row_type conflict \(existing='UserMini'\)"):
+        test_project.generate_no_import()
+
+
+def test_same_stmt_same_row_type_is_allowed(
+    test_project: ProjectBuilder,
+) -> None:
+    test_project.set_queries_source(
+        """from typing import Any
+def testdb_sql(q: str, **kwargs: Any) -> Any: ...
+
+q1 = testdb_sql("SELECT id, username FROM users", row_type="UserMini")
+q2 = testdb_sql("SELECT id, username FROM users", row_type="UserMini")
+"""
+    )
+
+    assert test_project.generate_no_import() is True
+
+
 def test_sqlc_failure_returns_false(test_project: ProjectBuilder) -> None:
     test_project.add_query("bad_query", "SELEC FROM users")
     assert test_project.generate_no_import() is False
@@ -67,12 +98,11 @@ def test_result_shapes_validation_error_one_col(test_project: ProjectBuilder) ->
         test_project.generate_no_import()
 
 
-def test_unsupported_param_types_json(test_project: ProjectBuilder) -> None:
+def test_json_param_generates_successfully(test_project: ProjectBuilder) -> None:
     test_project.add_query(
-        "bad_json", "INSERT INTO json_payloads (payload) VALUES ($1)"
+        "insert_json", "INSERT INTO json_payloads (payload) VALUES ($1)"
     )
-    with pytest.raises(TypeError, match="Unsupported column type: json"):
-        test_project.generate_no_import()
+    assert test_project.generate_no_import() is True
 
 
 def test_unsupported_param_types_array(test_project: ProjectBuilder) -> None:

@@ -82,6 +82,17 @@ async def test_jsonb_roundtrip(test_project: ProjectBuilder) -> None:
     assert res == data
 
 
+async def test_json_roundtrip(test_project: ProjectBuilder) -> None:
+    insert_sql = "INSERT INTO json_payloads (payload) VALUES ($1) RETURNING payload"
+    test_project.add_query("q", insert_sql)
+
+    mod = test_project.generate()
+    data = {"key": "value", "list": [1, 2]}
+
+    res = await mod.testdb_sql(insert_sql).query_single_row(data)
+    assert res == data
+
+
 def test_unknown_statement_dispatch(test_project: ProjectBuilder) -> None:
     test_project.add_query("q1", "SELECT 1")
     mod = test_project.generate()

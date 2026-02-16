@@ -3,6 +3,7 @@ import dataclasses
 import hashlib
 import importlib
 import logging
+import warnings
 from collections import defaultdict
 from collections.abc import Callable
 from collections.abc import Iterator
@@ -12,27 +13,168 @@ from pathlib import Path
 import inflection
 from pydantic import alias_generators
 
-from iron_sql.sqlc import Catalog
-from iron_sql.sqlc import Column
-from iron_sql.sqlc import Enum
-from iron_sql.sqlc import Query
-from iron_sql.sqlc import SQLCResult
-from iron_sql.sqlc import run_sqlc
+from iron_sql.codegen.sqlc import Catalog
+from iron_sql.codegen.sqlc import Column
+from iron_sql.codegen.sqlc import Enum
+from iron_sql.codegen.sqlc import Query
+from iron_sql.codegen.sqlc import SQLCResult
+from iron_sql.codegen.sqlc import run_sqlc
+from iron_sql.codegen.util import indent_block
+from iron_sql.codegen.util import write_if_changed
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass(kw_only=True, frozen=True)
-class ColumnPySpec:
+class ColumnSpec:
     name: str
     table: str
+    py_type: str
+    json_type: str | None = None
+
+
+@dataclass(kw_only=True, frozen=True)
+class ParamSpec:
+    name: str
+    py_type: str
+    is_named: bool
     db_type: str
     not_null: bool
     is_array: bool
-    py_type: str
+    json_type: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.db_type == "jsonb" and self.is_array:
+            msg = "Unsupported column type: jsonb[]"
+            raise TypeError(msg)
+
+    @property
+    def serialized_expr(self) -> str:
+        if self.json_type:
+            return f"runtime.serialize_json_param({self.json_type}, {self.name}, {self.db_type!r})"  # noqa: E501
+
+        match self.db_type:
+            case "json":
+                expr = f"pgjson.Json({self.name})"
+            case "jsonb":
+                expr = f"pgjson.Jsonb({self.name})"
+            case _:
+                return self.name
+
+        if not self.not_null:
+            return f"{expr} if {self.name} is not None else None"
+        return expr
 
 
-def _collect_used_enums(sqlc_res: SQLCResult) -> set[tuple[str, str]]:
+class UnknownSQLTypeWarning(UserWarning):
+    pass
+
+
+_SQL_TYPE_MAP: dict[str, str] = {
+    "bool": "bool",
+    "boolean": "bool",
+    "int2": "int",
+    "int4": "int",
+    "int8": "int",
+    "smallint": "int",
+    "integer": "int",
+    "bigint": "int",
+    "serial": "int",
+    "bigserial": "int",
+    "oid": "int",
+    "float4": "float",
+    "float8": "float",
+    "numeric": "decimal.Decimal",
+    "varchar": "str",
+    "text": "str",
+    "bpchar": "str",
+    "char": "str",
+    "name": "str",
+    "bytea": "bytes",
+    "json": "object",
+    "jsonb": "object",
+    "inet": "ipaddress.IPv4Address | ipaddress.IPv6Address | ipaddress.IPv4Interface | ipaddress.IPv6Interface",  # noqa: E501
+    "cidr": "ipaddress.IPv4Network | ipaddress.IPv6Network",
+    "date": "datetime.date",
+    "time": "datetime.time",
+    "timetz": "datetime.time",
+    "timestamp": "datetime.datetime",
+    "timestamptz": "datetime.datetime",
+    "interval": "datetime.timedelta",
+    "uuid": "uuid.UUID",
+    "any": "object",
+    "anyelement": "object",
+}
+
+
+@dataclass(kw_only=True, frozen=True)
+class TypeResolver:
+    catalog: Catalog
+    package_name: str
+    to_pascal_fn: Callable[[str], str]
+    to_snake_fn: Callable[[str], str]
+    type_overrides: dict[str, str]
+    json_col_overrides: dict[tuple[str, str], str]
+
+    def column_spec(self, column: Column) -> ColumnSpec:
+        _, py_type, json_type = self._resolve(column)
+        return ColumnSpec(
+            name=column.name,
+            table=column.table.name if column.table else "unknown",
+            py_type=py_type,
+            json_type=json_type,
+        )
+
+    def param_spec(self, column: Column, name: str, *, is_named: bool) -> ParamSpec:
+        db_type, py_type, json_type = self._resolve(column)
+        return ParamSpec(
+            name=name,
+            py_type=py_type,
+            is_named=is_named,
+            db_type=db_type,
+            not_null=column.not_null,
+            is_array=column.is_array,
+            json_type=json_type,
+        )
+
+    def _resolve(self, column: Column) -> tuple[str, str, str | None]:
+        db_type = column.type.name.removeprefix("pg_catalog.")
+
+        json_type = None
+        if column.table is not None:
+            col_name = column.original_name or column.name
+            json_type = self.json_col_overrides.get((column.table.name, col_name))
+
+        if json_type:
+            py_type = json_type
+        elif db_type in self.type_overrides:
+            py_type = self.type_overrides[db_type]
+        elif db_type in _SQL_TYPE_MAP:
+            py_type = _SQL_TYPE_MAP[db_type]
+        elif self.catalog.schema_by_ref(column.type).has_enum(db_type):
+            py_type = (
+                self.to_pascal_fn(f"{self.package_name}_{self.to_snake_fn(db_type)}")
+                if self.package_name
+                else "str"
+            )
+        else:
+            warnings.warn(
+                f"Unknown SQL type: {db_type}, mapped to 'object'",
+                category=UnknownSQLTypeWarning,
+                stacklevel=1,
+            )
+            py_type = "object"
+
+        if column.is_array:
+            py_type = f"Sequence[{py_type}]"
+
+        if not column.not_null:
+            py_type += " | None"
+
+        return db_type, py_type, json_type
+
+
+def collect_used_enums(sqlc_res: SQLCResult) -> set[tuple[str, str]]:
     return {
         (schema.name, col.type.name)
         for col in (
@@ -50,8 +192,10 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
     package_full_name: str,
     dsn_import: str,
     application_name: str | None = None,
-    to_pascal_fn=alias_generators.to_pascal,
-    to_snake_fn=alias_generators.to_snake,
+    type_overrides: dict[str, str] | None = None,
+    json_model_overrides: dict[str, str] | None = None,
+    to_pascal_fn: Callable[[str], str] = alias_generators.to_pascal,
+    to_snake_fn: Callable[[str], str] = alias_generators.to_snake,
     debug_path: Path | None = None,
     src_path: Path = Path(),
     sqlc_path: Path | None = None,
@@ -66,18 +210,26 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
         dsn_import: Import path to DSN string (e.g.,
             "myapp.config:CONFIG.db_url")
         application_name: Optional application name for connection pool
+        type_overrides: Optional mapping of DB type name (without "pg_catalog.")
+            to a Python type string used in generated annotations.
+        json_model_overrides: Optional mapping of "table.column" to
+            "module:ClassName" for JSON model serialization/deserialization.
         to_pascal_fn: Function to convert names to PascalCase (default:
             pydantic's to_pascal)
         to_snake_fn: Function to convert names to snake_case (default:
             pydantic's to_snake)
         debug_path: Optional path to save sqlc inputs for inspection
         src_path: Base source path for scanning queries (default: Path())
-        sqlc_path: Optional path to sqlc binary if not in PATH
+        sqlc_path: Optional path to sqlc config directory
         tempdir_path: Optional path for temporary file generation
         sqlc_command: Optional command prefix to run sqlc
 
     Returns:
         True if the package was generated or modified, False otherwise
+
+    Raises:
+        ValueError: If json_model_overrides keys/values are malformed,
+            reference non-existent tables/columns, or target non-JSON columns.
     """
     dsn_import_package, dsn_import_path = dsn_import.split(":")
 
@@ -87,6 +239,7 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
     target_package_path = src_path / f"{package_full_name.replace('.', '/')}.py"
 
     queries = list(find_all_queries(src_path, sql_fn_name))
+    validate_stmt_has_single_row_type(queries)
     queries = list({q.name: q for q in queries}.values())
 
     dsn_package = importlib.import_module(dsn_import_package)
@@ -106,18 +259,80 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
         logger.error("Error running SQLC:\n%s", sqlc_res.error)
         return False
 
+    json_import_block = ""
+    json_col_overrides: dict[tuple[str, str], str] = {}
+
+    if json_model_overrides:
+        json_compatible_types = {"json", "jsonb", "text", "varchar"}
+        col_types = {
+            (table.rel.name, column.name): column.type.name.removeprefix("pg_catalog.")
+            for schema in sqlc_res.catalog.schemas
+            for table in schema.tables
+            for column in table.columns
+        }
+        tables = {table for table, _ in col_types}
+
+        parsed: dict[tuple[str, str], tuple[str, str]] = {}
+        for key, import_path in json_model_overrides.items():
+            table_name, sep, col_name = key.partition(".")
+            if not sep:
+                msg = f"json_model_overrides key must be 'table.column', got: {key!r}"
+                raise ValueError(msg)
+            if table_name not in tables:
+                msg = f"json_model_overrides: table {table_name!r} not found in catalog"
+                raise ValueError(msg)
+            if (table_name, col_name) not in col_types:
+                msg = (
+                    f"json_model_overrides: column {col_name!r} "
+                    f"not found in table {table_name!r}"
+                )
+                raise ValueError(msg)
+
+            db_type = col_types[table_name, col_name]
+            if db_type not in json_compatible_types:
+                msg = (
+                    f"json_model_overrides: column "
+                    f"{table_name}.{col_name} has type "
+                    f"{db_type!r}, expected one of "
+                    f"{json_compatible_types}"
+                )
+                raise ValueError(msg)
+
+            module_path, sep, class_name = import_path.partition(":")
+            if not sep:
+                msg = (
+                    "json_model_overrides value must be "
+                    f"'module:Class', got: {import_path!r}"
+                )
+                raise ValueError(msg)
+
+            parsed[table_name, col_name] = (module_path, class_name)
+
+        modules = sorted({module for module, _ in parsed.values()})
+        json_import_block = "\n" + "\n".join(f"import {m}" for m in modules)
+        json_col_overrides = {
+            key: f"{module}.{cls}" for key, (module, cls) in parsed.items()
+        }
+
+    resolver = TypeResolver(
+        catalog=sqlc_res.catalog,
+        package_name=package_name,
+        to_pascal_fn=to_pascal_fn,
+        to_snake_fn=to_snake_fn,
+        type_overrides=type_overrides or {},
+        json_col_overrides=json_col_overrides,
+    )
+
     ordered_entities, result_types = map_entities(
-        package_name,
         sqlc_res.queries,
-        sqlc_res.catalog,
         sqlc_res.used_schemas(),
         queries,
-        to_pascal_fn,
+        resolver,
     )
 
     entities = [render_entity(e.name, e.column_specs) for e in ordered_entities]
 
-    used_enums = _collect_used_enums(sqlc_res)
+    used_enums = collect_used_enums(sqlc_res)
 
     enums = [
         render_enum_class(e, package_name, to_pascal_fn, to_snake_fn)
@@ -132,21 +347,20 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
             q.text,
             package_name,
             [
-                (
-                    column_py_spec(
-                        p.column,
-                        sqlc_res.catalog,
-                        package_name,
-                        to_pascal_fn,
-                        to_snake_fn,
-                        p.number,
-                    ),
-                    p.column.is_named_param,
+                resolver.param_spec(
+                    p.column,
+                    p.column.name or f"param_{p.number}",
+                    is_named=p.column.is_named_param,
                 )
                 for p in q.params
             ],
             result_types[q.name],
             len(q.columns),
+            (
+                resolver.column_spec(q.columns[0]).json_type
+                if len(q.columns) == 1
+                else None
+            ),
         )
         for q in sqlc_res.queries
     ]
@@ -168,6 +382,7 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
         sorted(query_overloads),
         sorted(query_dict_entries),
         application_name,
+        json_import_block,
     )
     changed = write_if_changed(target_package_path, new_content + "\n")
     if changed:
@@ -175,7 +390,7 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
     return changed
 
 
-def render_package(
+def render_package(  # noqa: PLR0913, PLR0917
     dsn_import_package: str,
     dsn_import_path: str,
     package_name: str,
@@ -186,6 +401,7 @@ def render_package(
     query_overloads: list[str],
     query_dict_entries: list[str],
     application_name: str | None = None,
+    json_import_block: str = "",
 ):
     return f"""
 
@@ -193,23 +409,11 @@ def render_package(
 
 # fmt: off
 # pyright: reportUnusedImport=false
-# ruff: noqa: A002
-# ruff: noqa: ARG001
-# ruff: noqa: C901
-# ruff: noqa: E303
-# ruff: noqa: E501
-# ruff: noqa: F401
-# ruff: noqa: FBT001
-# ruff: noqa: I001
-# ruff: noqa: N801
-# ruff: noqa: PLR0912
-# ruff: noqa: PLR0913
-# ruff: noqa: PLR0917
-# ruff: noqa: Q000
-# ruff: noqa: RUF100
+# ruff: noqa
 
 import datetime
 import decimal
+import ipaddress
 import uuid
 from collections.abc import AsyncIterator
 from collections.abc import Sequence
@@ -227,6 +431,7 @@ from psycopg.types import json as pgjson
 from iron_sql import runtime
 
 from {dsn_import_package} import {dsn_import_path.split(".", maxsplit=1)[0]}
+{json_import_block}
 
 {package_name.upper()}_POOL = runtime.ConnectionPool(
     {dsn_import_path},
@@ -317,73 +522,57 @@ class {class_name}(StrEnum):
     """.strip()
 
 
-def render_entity(
-    name: str,
-    columns: tuple[ColumnPySpec, ...],
-) -> str:
+def render_entity(name: str, columns: tuple[ColumnSpec, ...]) -> str:
+    fields = "\n    ".join(f"{c.name}: {c.py_type}" for c in columns)
+    json_cols = [(c.name, c.json_type) for c in columns if c.json_type]
+    validated = ""
+    if json_cols:
+        args = ", ".join(f"{n}={jt}" for n, jt in json_cols)
+        validated = f"\n@runtime.json_validated({args})"
+
     return f"""
 
-@dataclass(kw_only=True)
+@dataclass(kw_only=True){validated}
 class {name}:
-    {"\n    ".join(f"{c.name}: {c.py_type}" for c in columns)}
+    {fields}
 
     """.strip()
 
 
-def deduplicate_params(
-    params: list[tuple[ColumnPySpec, bool]],
-) -> list[tuple[ColumnPySpec, bool]]:
+def deduplicate_params(params: list[ParamSpec]) -> list[ParamSpec]:
     seen = defaultdict(int)
-    result: list[tuple[ColumnPySpec, bool]] = []
-    for column, is_named in params:
-        seen[column.name] += 1
+    result: list[ParamSpec] = []
+    for param in params:
+        seen[param.name] += 1
         new_name = (
-            f"{column.name}{seen[column.name]}"
-            if seen[column.name] > 1
-            else column.name
+            f"{param.name}{seen[param.name]}" if seen[param.name] > 1 else param.name
         )
-        new_column = dataclasses.replace(column, name=new_name)
-        result.append((new_column, is_named))
+        result.append(dataclasses.replace(param, name=new_name))
     return result
-
-
-def serialized_arg(column: ColumnPySpec) -> str:
-    match column:
-        case ColumnPySpec(db_type="json", not_null=True):
-            msg = "Unsupported column type: json"
-            raise TypeError(msg)
-        case ColumnPySpec(db_type="jsonb", is_array=True):
-            msg = "Unsupported column type: jsonb[]"
-            raise TypeError(msg)
-        case ColumnPySpec(db_type="jsonb", not_null=True, name=name):
-            return f"pgjson.Jsonb({name})"
-        case ColumnPySpec(db_type="jsonb", not_null=False, name=name):
-            return f"pgjson.Jsonb({name}) if {name} is not None else None"
-        case ColumnPySpec(name=name):
-            return name
 
 
 def render_query_class(
     query_name: str,
     stmt: str,
     package_name: str,
-    query_params: list[tuple[ColumnPySpec, bool]],
+    query_params: list[ParamSpec],
     result: str,
     columns_num: int,
+    scalar_json_type: str | None = None,
 ) -> str:
     query_params = deduplicate_params(query_params)
 
-    match [column for column, _ in query_params]:
+    match query_params:
         case []:
             params_arg = "None"
-        case [column]:
-            params_arg = f"({serialized_arg(column)},)"
-        case columns:
-            params_arg = f"({', '.join(serialized_arg(column) for column in columns)})"
+        case [param]:
+            params_arg = f"({param.serialized_expr},)"
+        case params:
+            params_arg = f"({', '.join(p.serialized_expr for p in params)})"
 
-    query_fn_params = [f"{column.name}: {column.py_type}" for column, _ in query_params]
+    query_fn_params = [f"{p.name}: {p.py_type}" for p in query_params]
     first_named_param_idx = next(
-        (i for i, (_, is_named_param) in enumerate(query_params) if is_named_param), -1
+        (i for i, p in enumerate(query_params) if p.is_named), -1
     )
     if first_named_param_idx >= 0:
         query_fn_params.insert(first_named_param_idx, "*")
@@ -394,10 +583,16 @@ def render_query_class(
     if columns_num == 0:
         row_factory = "psycopg.rows.scalar_row"
     elif columns_num == 1:
-        if result.endswith(" | None"):
-            row_factory = f"runtime.typed_scalar_row({base_result}, not_null=False)"
-        else:
-            row_factory = f"runtime.typed_scalar_row({base_result}, not_null=True)"
+        not_null_str = "True" if not result.endswith(" | None") else "False"
+        validate_arg = (
+            f", validate=lambda _v: runtime.validate_json_field({scalar_json_type}, _v)"
+            if scalar_json_type
+            else ""
+        )
+        row_factory = (
+            f"runtime.typed_scalar_row"
+            f"({base_result}, not_null={not_null_str}{validate_arg})"
+        )
     else:
         row_factory = f"psycopg.rows.class_row({result})"
 
@@ -463,7 +658,7 @@ def render_query_dict_entry(query_name: str, stmt: str) -> str:
     return f"{stmt!r}: {query_name}"
 
 
-@dataclass(kw_only=True)
+@dataclass(kw_only=True, frozen=True)
 class CodeQuery:
     stmt: str
     row_type: str | None
@@ -480,61 +675,47 @@ class CodeQuery:
         return f"{self.file}:{self.lineno}"
 
 
-@dataclass(kw_only=True)
+@dataclass(kw_only=True, frozen=True)
 class SQLEntity:
-    package_name: str
+    resolver: TypeResolver
     set_name: str | None
     table_name: str | None
-    columns: list[Column]
-    catalog: Catalog = dataclasses.field(repr=False)
-    to_pascal_fn: Callable[[str], str]
-    to_snake_fn: Callable[[str], str] = inflection.underscore
+    columns: tuple[Column, ...]
 
     @property
     def name(self) -> str:
         if self.set_name:
             return self.set_name
         if self.table_name:
-            return self.to_pascal_fn(
-                f"{self.package_name}_{inflection.singularize(self.table_name)}"
+            return self.resolver.to_pascal_fn(
+                f"{self.resolver.package_name}_{inflection.singularize(self.table_name)}"
             )
         hash_base = repr(self.column_specs)
         md5_hash = hashlib.md5(hash_base.encode(), usedforsecurity=False).hexdigest()
         return f"QueryResult_{md5_hash}"
 
     @property
-    def column_specs(self) -> tuple[ColumnPySpec, ...]:
-        return tuple(
-            column_py_spec(
-                c, self.catalog, self.package_name, self.to_pascal_fn, self.to_snake_fn
-            )
-            for c in self.columns
-        )
+    def column_specs(self) -> tuple[ColumnSpec, ...]:
+        return tuple(self.resolver.column_spec(c) for c in self.columns)
 
 
 def map_entities(
-    package_name: str,
-    queries_from_sqlc: list[Query],
-    catalog: Catalog,
-    used_schemas: list[str],
+    queries_from_sqlc: tuple[Query, ...],
+    used_schemas: tuple[str, ...],
     queries_from_code: list[CodeQuery],
-    to_pascal_fn: Callable[[str], str],
-    to_snake_fn: Callable[[str], str] = inflection.underscore,
-):
+    resolver: TypeResolver,
+) -> tuple[list[SQLEntity], dict[str, str]]:
     row_types = {q.name: q.row_type for q in queries_from_code}
 
     table_entities = [
         SQLEntity(
-            package_name=package_name,
+            resolver=resolver,
             set_name=None,
             table_name=t.rel.name,
             columns=t.columns,
-            catalog=catalog,
-            to_pascal_fn=to_pascal_fn,
-            to_snake_fn=to_snake_fn,
         )
         for sch in used_schemas
-        for t in catalog.schema_by_name(sch).tables
+        for t in resolver.catalog.schema_by_name(sch).tables
     ]
     specs_to_entities = {e.column_specs: e for e in table_entities}
 
@@ -548,13 +729,10 @@ def map_entities(
 
     query_result_entities = {
         q.name: SQLEntity(
-            package_name=package_name,
+            resolver=resolver,
             set_name=row_types[q.name],
             table_name=None,
             columns=q.columns,
-            catalog=catalog,
-            to_pascal_fn=to_pascal_fn,
-            to_snake_fn=to_snake_fn,
         )
         for q in queries_from_sqlc
         if len(q.columns) > 1
@@ -574,83 +752,12 @@ def map_entities(
         if len(q.columns) == 0:
             result_types[q.name] = "None"
         elif len(q.columns) == 1:
-            result_types[q.name] = column_py_spec(
-                q.columns[0], catalog, package_name, to_pascal_fn, to_snake_fn
-            ).py_type
+            result_types[q.name] = resolver.column_spec(q.columns[0]).py_type
         else:
-            column_spec = query_result_entities[q.name].column_specs
-            result_types[q.name] = unique_entities[column_spec].name
+            column_specs = query_result_entities[q.name].column_specs
+            result_types[q.name] = unique_entities[column_specs].name
 
     return ordered_entities, result_types
-
-
-def column_py_spec(  # noqa: C901, PLR0912
-    column: Column,
-    catalog: Catalog,
-    package_name: str,
-    to_pascal_fn: Callable[[str], str],
-    to_snake_fn: Callable[[str], str] = inflection.underscore,
-    number: int = 0,
-) -> ColumnPySpec:
-    db_type = column.type.name.removeprefix("pg_catalog.")
-    match db_type:
-        case "bool" | "boolean":
-            py_type = "bool"
-        case (
-            "int2"
-            | "int4"
-            | "int8"
-            | "smallint"
-            | "integer"
-            | "bigint"
-            | "serial"
-            | "bigserial"
-        ):
-            py_type = "int"
-        case "float4" | "float8":
-            py_type = "float"
-        case "numeric":
-            py_type = "decimal.Decimal"
-        case "varchar" | "text":
-            py_type = "str"
-        case "bytea":
-            py_type = "bytes"
-        case "json" | "jsonb":
-            py_type = "object"
-        case "date":
-            py_type = "datetime.date"
-        case "time" | "timetz":
-            py_type = "datetime.time"
-        case "timestamp" | "timestamptz":
-            py_type = "datetime.datetime"
-        case "uuid":
-            py_type = "uuid.UUID"
-        case "any" | "anyelement":
-            py_type = "object"
-        case enum if catalog.schema_by_ref(column.type).has_enum(enum):
-            py_type = (
-                to_pascal_fn(f"{package_name}_{to_snake_fn(enum)}")
-                if package_name
-                else "str"
-            )
-        case _:
-            logger.warning(f"Unknown SQL type: {column.type.name} ({column.name})")
-            py_type = "object"
-
-    if column.is_array:
-        py_type = f"Sequence[{py_type}]"
-
-    if not column.not_null:
-        py_type += " | None"
-
-    return ColumnPySpec(
-        name=column.name or f"param_{number}",
-        table=column.table.name if column.table else "unknown",
-        db_type=db_type,
-        not_null=column.not_null,
-        is_array=column.is_array,
-        py_type=py_type,
-    )
 
 
 def find_fn_calls(
@@ -709,18 +816,12 @@ def find_all_queries(src_path: Path, sql_fn_name: str) -> Iterator[CodeQuery]:
         )
 
 
-def indent_block(block: str, indent: str) -> str:
-    return "\n".join(
-        indent + line if i > 0 and line.strip() else line
-        for i, line in enumerate(block.split("\n"))
-    )
-
-
-def write_if_changed(path: Path, new_content: str) -> bool:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    existing_content = path.read_text(encoding="utf-8") if path.exists() else None
-    if existing_content == new_content:
-        return False
-    path.write_text(new_content, encoding="utf-8")
-    path.touch()
-    return True
+def validate_stmt_has_single_row_type(queries: list[CodeQuery]) -> None:
+    row_type_by_stmt: dict[str, str | None] = {}
+    for query in queries:
+        if query.stmt in row_type_by_stmt:
+            if query.row_type != row_type_by_stmt[query.stmt]:
+                msg = f"row_type conflict (existing={row_type_by_stmt[query.stmt]!r})"
+                raise ValueError(msg)
+        else:
+            row_type_by_stmt[query.stmt] = query.row_type

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from iron_sql.sqlc import run_sqlc
+from iron_sql.codegen.sqlc import run_sqlc
 
 
 def test_run_sqlc_exclusive_args(tmp_path: Path) -> None:
@@ -83,7 +83,7 @@ def test_run_sqlc_no_queries() -> None:
             queries=[],
             dsn="postgres://",
         )
-        assert result.queries == []
-        assert result.catalog.schemas == []
+        assert result.queries == ()
+        assert result.catalog.schemas == ()
     finally:
         schema_path.unlink()

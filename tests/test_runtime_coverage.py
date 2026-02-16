@@ -30,6 +30,18 @@ def test_get_one_row_or_none_too_many() -> None:
         get_one_row_or_none([1, 2])
 
 
+async def test_typed_scalar_row_not_null_raises_on_none(
+    async_pool: ConnectionPool,
+) -> None:
+    async with (
+        async_pool.connection() as conn,
+        conn.cursor(row_factory=typed_scalar_row(int, not_null=True)) as cur,
+    ):
+        await cur.execute("SELECT NULL::int")
+        with pytest.raises(TypeError, match="Expected non-null value"):
+            await cur.fetchone()
+
+
 async def test_typed_scalar_row_type_mismatch(async_pool: ConnectionPool) -> None:
     async with (
         async_pool.connection() as conn,
