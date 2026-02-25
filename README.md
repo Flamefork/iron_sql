@@ -14,7 +14,7 @@ pip install iron-sql             # runtime only (psycopg + psycopg-pool + pydant
 pip install iron-sql[codegen]    # + inflection for code generation
 ```
 
-You also need [`sqlc` v2](https://docs.sqlc.dev/en/latest/overview/install.html) available in your PATH (or pass `sqlc_command`/`sqlc_path` to the generator).
+The `sqlc` binary is bundled automatically via the `sqlc` Python package.
 
 ## Key Features
 - **Query discovery.** `generate_sql_package` scans your codebase for calls like `<package>_sql("SELECT ...")`, runs `sqlc` for type analysis, and emits a typed module.

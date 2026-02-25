@@ -11,7 +11,6 @@ from typing import LiteralString
 
 import psycopg
 import pytest
-from iron_sql_dev import SqlcContainer
 from psycopg import sql
 from testcontainers.postgres import PostgresContainer
 
@@ -123,23 +122,6 @@ def pg_test_dsn(pg_dsn: str, pg_template_db: str) -> Iterator[str]:
 
 
 # =============================================================================
-# SQLC Code Generation
-# =============================================================================
-
-
-@pytest.fixture(scope="session")
-def containerized_sqlc(
-    tmp_path_factory: pytest.TempPathFactory,
-) -> Iterator[SqlcContainer]:
-    sqlc = SqlcContainer()
-    sqlc.start(tmp_path_factory.getbasetemp())
-    try:
-        yield sqlc
-    finally:
-        sqlc.stop()
-
-
-# =============================================================================
 # Test Project Builder
 # =============================================================================
 
@@ -151,13 +133,11 @@ class ProjectBuilder:
         dsn: str,
         test_name: str,
         schema_path: Path,
-        sqlc: SqlcContainer,
     ):
         self.root = root
         self.dsn = dsn
         self.test_name = test_name
         self.schema_path = schema_path
-        self.sqlc = sqlc
         self.pkg_name = f"testapp_{test_name}.testdb"
         self.src_path = root / "src"
         self.app_pkg = f"testapp_{test_name}"
@@ -230,7 +210,6 @@ class ProjectBuilder:
             dsn_import=f"{self.app_pkg}.config:DSN",
             src_path=self.src_path,
             tempdir_path=self.src_path,
-            sqlc_command=self.sqlc.sqlc_command(),
             type_overrides=type_overrides,
             json_model_overrides=json_model_overrides,
         )
@@ -260,12 +239,9 @@ async def test_project(
     request: pytest.FixtureRequest,
     pg_test_dsn: str,
     schema_path: Path,
-    containerized_sqlc: SqlcContainer,
 ) -> AsyncIterator[ProjectBuilder]:
     clean_name = request.node.name.replace("[", "_").replace("]", "_").replace("-", "_")
-    builder = ProjectBuilder(
-        tmp_path, pg_test_dsn, clean_name, schema_path, containerized_sqlc
-    )
+    builder = ProjectBuilder(tmp_path, pg_test_dsn, clean_name, schema_path)
 
     # Snapshot state before test
     before_modules = set(sys.modules)

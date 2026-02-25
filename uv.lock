@@ -2,12 +2,6 @@ version = 1
 revision = 3
 requires-python = ">=3.13"
 
-[manifest]
-members = [
-    "iron-sql",
-    "iron-sql-dev",
-]
-
 [[package]]
 name = "annotated-types"
 version = "0.7.0"
@@ -203,19 +197,20 @@ dependencies = [
 [package.optional-dependencies]
 codegen = [
     { name = "inflection" },
+    { name = "sqlc" },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "basedpyright" },
     { name = "iron-sql", extra = ["codegen"] },
-    { name = "iron-sql-dev" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "pytest-randomly" },
     { name = "ruff" },
+    { name = "testcontainers" },
 ]
 
 [package.metadata]
@@ -224,6 +219,7 @@ requires-dist = [
     { name = "psycopg", specifier = ">=3.3.2" },
     { name = "psycopg-pool", specifier = ">=3.3.0" },
     { name = "pydantic", specifier = ">=2.12.4" },
+    { name = "sqlc", marker = "extra == 'codegen'", specifier = ">=1.30.0" },
 ]
 provides-extras = ["codegen"]
 
@@ -231,25 +227,14 @@ provides-extras = ["codegen"]
 dev = [
     { name = "basedpyright", specifier = ">=1.31.7" },
     { name = "iron-sql", extras = ["codegen"] },
-    { name = "iron-sql-dev", editable = "dev" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.2" },
     { name = "pytest", specifier = ">=8.4.2" },
     { name = "pytest-asyncio", specifier = ">=1.2.0" },
     { name = "pytest-cov", specifier = ">=7.0.0" },
     { name = "pytest-randomly", specifier = ">=4.0.1" },
     { name = "ruff", specifier = ">=0.14.1" },
+    { name = "testcontainers", specifier = ">=4" },
 ]
-
-[[package]]
-name = "iron-sql-dev"
-version = "0.0.0"
-source = { editable = "dev" }
-dependencies = [
-    { name = "testcontainers" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "testcontainers", specifier = ">=4" }]
 
 [[package]]
 name = "nodejs-wheel-binaries"
@@ -535,6 +520,21 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/6a/c5/abd840d4132fd51a12f594934af5eba1d5d27298a6f5b5d6c3be45301caf/ruff-0.14.13-py3-none-win32.whl", hash = "sha256:ef720f529aec113968b45dfdb838ac8934e519711da53a0456038a0efecbd680", size = 12919024, upload-time = "2026-01-15T20:14:43.647Z" },
     { url = "https://files.pythonhosted.org/packages/c2/55/6384b0b8ce731b6e2ade2b5449bf07c0e4c31e8a2e68ea65b3bafadcecc5/ruff-0.14.13-py3-none-win_amd64.whl", hash = "sha256:6070bd026e409734b9257e03e3ef18c6e1a216f0435c6751d7a8ec69cb59abef", size = 14097887, upload-time = "2026-01-15T20:15:01.48Z" },
     { url = "https://files.pythonhosted.org/packages/4d/e1/7348090988095e4e39560cfc2f7555b1b2a7357deba19167b600fdf5215d/ruff-0.14.13-py3-none-win_arm64.whl", hash = "sha256:7ab819e14f1ad9fe39f246cfcc435880ef7a9390d81a2b6ac7e01039083dd247", size = 13080224, upload-time = "2026-01-15T20:14:45.853Z" },
+]
+
+[[package]]
+name = "sqlc"
+version = "1.30.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6e/b8/c567e6ff086727af3436b917230228787968a2c2517513d32a566a2184be/sqlc-1.30.0-py3-none-macosx_10_9_x86_64.whl", hash = "sha256:c6ef8260fe45c7170be2b222658dbfa36df2e8797cd70fc9c86ae9f9d9072697", size = 57534259, upload-time = "2026-02-25T22:46:40.67Z" },
+    { url = "https://files.pythonhosted.org/packages/e5/80/cd154ef6a69deb41a1d1f9f306261d2049db04eda5215e0769ad9f543f03/sqlc-1.30.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:6c63de37efd9eabd808f5519646299be0ae1dd7ae4ee27c8f72c9ae0d740f9fd", size = 55655047, upload-time = "2026-02-25T22:45:56.101Z" },
+    { url = "https://files.pythonhosted.org/packages/78/5e/2d5449d7191f2dda7dc6538fb9d6c962f7f3d504de3869173c6174f14b7b/sqlc-1.30.0-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:4ad3428f6dc5a5a83169e78a376672593b16067934f1874181b97d0ffa6e5591", size = 53741659, upload-time = "2026-02-25T22:47:02.548Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/2e/72c6b000aba248e620e13dcd67a05719a19dae3c370ca0b32a160a8a3141/sqlc-1.30.0-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:a1ee21510d3414deac0a76350711033f6f5ee4b576d0af8bf92674fdf8a80b45", size = 55986268, upload-time = "2026-02-25T22:46:07.628Z" },
+    { url = "https://files.pythonhosted.org/packages/5d/94/e96f1bf5025fdfaf7dec684b10dca82d418e569148d70458f589fb63c3bf/sqlc-1.30.0-py3-none-musllinux_1_2_aarch64.whl", hash = "sha256:24a3a6646ea81414c799c7e83d8e07c200b530e7ec9c6db5535635ffa5050dbc", size = 53741658, upload-time = "2026-02-25T22:46:28.872Z" },
+    { url = "https://files.pythonhosted.org/packages/b2/a2/9f901b4457c165ba0f8d03294af31f3b2e5f99ea254e70eb3a0d3cbb4c9a/sqlc-1.30.0-py3-none-musllinux_1_2_x86_64.whl", hash = "sha256:468173b26d1a766314a3f06f21bc71d0879fb19851a3089c24968c2d11cd8784", size = 55986265, upload-time = "2026-02-25T22:47:13.369Z" },
+    { url = "https://files.pythonhosted.org/packages/63/6c/ca5598601f92e79bef3af7a7fe51b34b0091c9f848dcc96cc4b90b025d4a/sqlc-1.30.0-py3-none-win_amd64.whl", hash = "sha256:5d7b41e98ba2dd52479bd408484dd0f85604ecb159a062111ed973cb936b90a0", size = 57196471, upload-time = "2026-02-25T22:46:52.099Z" },
+    { url = "https://files.pythonhosted.org/packages/dc/79/e1af2937af6fca374f35cee3b3ceb692b9ff58dcf4a66dad29043965d53f/sqlc-1.30.0-py3-none-win_arm64.whl", hash = "sha256:c0f7d419166b9d63ec0d069860cade4254464fbb633f2e230546af0fc191e362", size = 54348216, upload-time = "2026-02-25T22:46:18.356Z" },
 ]
 
 [[package]]
