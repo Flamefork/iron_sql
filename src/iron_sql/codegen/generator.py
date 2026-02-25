@@ -198,39 +198,8 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
     to_snake_fn: Callable[[str], str] = alias_generators.to_snake,
     debug_path: Path | None = None,
     src_path: Path = Path(),
-    sqlc_path: Path | None = None,
     tempdir_path: Path | None = None,
-    sqlc_command: list[str] | None = None,
 ) -> bool:
-    """Generate a typed SQL package from schema and queries.
-
-    Args:
-        schema_path: Path to the Postgres schema SQL file (relative to src_path)
-        package_full_name: Target module name (e.g., "myapp.mydatabase")
-        dsn_import: Import path to DSN string (e.g.,
-            "myapp.config:CONFIG.db_url")
-        application_name: Optional application name for connection pool
-        type_overrides: Optional mapping of DB type name (without "pg_catalog.")
-            to a Python type string used in generated annotations.
-        json_model_overrides: Optional mapping of "table.column" to
-            "module:ClassName" for JSON model serialization/deserialization.
-        to_pascal_fn: Function to convert names to PascalCase (default:
-            pydantic's to_pascal)
-        to_snake_fn: Function to convert names to snake_case (default:
-            pydantic's to_snake)
-        debug_path: Optional path to save sqlc inputs for inspection
-        src_path: Base source path for scanning queries (default: Path())
-        sqlc_path: Optional path to sqlc config directory
-        tempdir_path: Optional path for temporary file generation
-        sqlc_command: Optional command prefix to run sqlc
-
-    Returns:
-        True if the package was generated or modified, False otherwise
-
-    Raises:
-        ValueError: If json_model_overrides keys/values are malformed,
-            reference non-existent tables/columns, or target non-JSON columns.
-    """
     dsn_import_package, dsn_import_path = dsn_import.split(":")
 
     package_name = package_full_name.split(".")[-1]  # noqa: PLC0207
@@ -250,9 +219,7 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
         [(q.name, q.stmt) for q in queries],
         dsn=dsn,
         debug_path=debug_path,
-        sqlc_path=sqlc_path,
         tempdir_path=tempdir_path,
-        sqlc_command=sqlc_command,
     )
 
     if sqlc_res.error:

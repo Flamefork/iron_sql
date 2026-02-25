@@ -177,7 +177,6 @@ CONFIG = Config("{test_project.dsn}")
         dsn_import=f"{test_project.app_pkg}.config:CONFIG.get_dsn()",
         src_path=test_project.src_path,
         tempdir_path=test_project.src_path,
-        sqlc_command=test_project.sqlc.sqlc_command(),
     )
 
     generated_path = (
