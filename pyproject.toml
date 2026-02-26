@@ -26,7 +26,7 @@ dependencies = [
 [project.optional-dependencies]
 codegen = [
     "inflection>=0.5.1",
-    "sqlc>=1.30.0",
+    "sqlc>=1.30.0.post18",
 ]
 
 [project.urls]
