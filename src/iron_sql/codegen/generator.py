@@ -382,6 +382,7 @@ import datetime
 import decimal
 import ipaddress
 import uuid
+from collections.abc import AsyncGenerator
 from collections.abc import AsyncIterator
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
@@ -424,6 +425,20 @@ async def {package_name}_connection() -> AsyncIterator[psycopg.AsyncConnection]:
 async def {package_name}_transaction() -> AsyncIterator[None]:
     async with {package_name}_connection() as conn, conn.transaction():
         yield
+
+
+@asynccontextmanager
+async def {package_name}_listen_session(
+    channel: str,
+) -> AsyncIterator[AsyncGenerator[str]]:
+    async with {package_name.upper()}_POOL.connection() as conn:
+        async with runtime.listen(conn, channel) as payloads:
+            yield payloads
+
+
+async def {package_name}_notify(channel: str, payload: str = "") -> None:
+    async with {package_name}_connection() as conn:
+        await runtime.notify(conn, channel, payload)
 
 
 {"\n\n\n".join(enums)}

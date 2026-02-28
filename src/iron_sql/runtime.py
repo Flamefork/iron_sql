@@ -1,4 +1,6 @@
+import contextlib
 import types
+from collections.abc import AsyncGenerator
 from collections.abc import AsyncIterator
 from collections.abc import Callable
 from collections.abc import Sequence
@@ -13,6 +15,7 @@ from typing import overload
 import psycopg
 import psycopg.rows
 import psycopg_pool
+from psycopg import sql
 from psycopg.types import json as pgjson
 from pydantic import TypeAdapter
 
@@ -20,11 +23,9 @@ _adapter_cache: dict[object, TypeAdapter[object]] = {}
 
 
 def get_adapter(typ: object) -> TypeAdapter[object]:
-    adapter = _adapter_cache.get(typ)
-    if adapter is None:
-        adapter = TypeAdapter(typ)
-        _adapter_cache[typ] = adapter
-    return adapter
+    if typ not in _adapter_cache:
+        _adapter_cache[typ] = TypeAdapter(typ)
+    return _adapter_cache[typ]
 
 
 class NoRowsError(Exception):
@@ -33,6 +34,66 @@ class NoRowsError(Exception):
 
 class TooManyRowsError(Exception):
     pass
+
+
+@asynccontextmanager
+async def listen(
+    conn: psycopg.AsyncConnection, channel: str
+) -> AsyncIterator[AsyncGenerator[str]]:
+    _validate_channel(channel)
+    if await _has_active_listen_subscriptions(conn):
+        msg = "listen() requires a connection without active LISTEN subscriptions"
+        raise RuntimeError(msg)
+    await execute_listen(conn, channel)
+
+    async def _payloads() -> AsyncGenerator[str]:
+        async for notify_msg in conn.notifies():
+            yield notify_msg.payload
+
+    gen = _payloads()
+    try:
+        yield gen
+    finally:
+        with contextlib.suppress(psycopg.OperationalError, psycopg.InterfaceError):
+            await gen.aclose()
+        with contextlib.suppress(psycopg.OperationalError, psycopg.InterfaceError):
+            await execute_unlisten(conn, channel)
+
+
+async def notify(conn: psycopg.AsyncConnection, channel: str, payload: str) -> None:
+    _validate_channel(channel)
+    await conn.execute(
+        sql.SQL("NOTIFY {}, {}").format(
+            sql.Identifier(channel),
+            sql.Literal(payload),
+        )
+    )
+
+
+async def execute_listen(conn: psycopg.AsyncConnection, channel: str) -> None:
+    _validate_channel(channel)
+    await conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(channel)))
+
+
+async def execute_unlisten(conn: psycopg.AsyncConnection, channel: str) -> None:
+    _validate_channel(channel)
+    await conn.execute(sql.SQL("UNLISTEN {}").format(sql.Identifier(channel)))
+
+
+async def _has_active_listen_subscriptions(conn: psycopg.AsyncConnection) -> bool:
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT EXISTS (SELECT FROM pg_listening_channels())")
+        row = await cur.fetchone()
+    if row is None:
+        msg = "Expected a single boolean row from active LISTEN check"
+        raise RuntimeError(msg)
+    return bool(row[0])
+
+
+def _validate_channel(name: str) -> None:
+    if not name:
+        msg = "Channel name must not be empty"
+        raise ValueError(msg)
 
 
 class ConnectionPool:
