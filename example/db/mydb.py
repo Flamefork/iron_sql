@@ -8,6 +8,7 @@ import datetime
 import decimal
 import ipaddress
 import uuid
+from collections.abc import AsyncGenerator
 from collections.abc import AsyncIterator
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
@@ -23,9 +24,9 @@ from psycopg.types import json as pgjson
 
 from iron_sql import runtime
 
-from myapp.config import DSN
+from example.config import DSN
 
-import myapp.models
+import example.models
 
 MYDB_POOL = runtime.ConnectionPool(
     DSN,
@@ -53,6 +54,20 @@ async def mydb_transaction() -> AsyncIterator[None]:
         yield
 
 
+@asynccontextmanager
+async def mydb_listen_session(
+    channel: str,
+) -> AsyncIterator[AsyncGenerator[str]]:
+    async with MYDB_POOL.connection() as conn:
+        async with runtime.listen(conn, channel) as payloads:
+            yield payloads
+
+
+async def mydb_notify(channel: str, payload: str = "") -> None:
+    async with mydb_connection() as conn:
+        await runtime.notify(conn, channel, payload)
+
+
 class MydbTaskPriority(StrEnum):
     LOW = "low"
     MEDIUM = "medium"
@@ -68,7 +83,7 @@ class MydbTaskStatus(StrEnum):
 
 
 @dataclass(kw_only=True)
-@runtime.json_validated(metadata=myapp.models.TaskMetadata)
+@runtime.json_validated(metadata=example.models.TaskMetadata)
 class MydbTask:
     id: uuid.UUID
     project_id: uuid.UUID
@@ -76,7 +91,7 @@ class MydbTask:
     title: str
     status: MydbTaskStatus
     priority: MydbTaskPriority
-    metadata: myapp.models.TaskMetadata | None
+    metadata: example.models.TaskMetadata | None
     due_date: datetime.date | None
     created_at: datetime.datetime
 
@@ -139,6 +154,22 @@ class Query_12e061f7aa94bf484295ab0018520059(Query):
             pass
 
 
+class Query_3ee53b6909da8b4496346dda36c9f442(Query):
+    @asynccontextmanager
+    async def _execute(self, params) -> AsyncIterator[psycopg.AsyncRawCursor[None]]:
+        stmt = 'INSERT INTO users (id, username, email)\nVALUES ($1, $2, $3)'
+        async with (
+            mydb_connection() as conn,
+            psycopg.AsyncRawCursor(conn, row_factory=psycopg.rows.scalar_row) as cur,
+        ):
+            await cur.execute(stmt, params)
+            yield cur
+
+    async def execute(self, *, id: uuid.UUID, username: str, email: str) -> None:
+        async with self._execute((id, username, email)):
+            pass
+
+
 class Query_41cb2f3cea216a76ba87b6ddb70e6be5(Query):
     @asynccontextmanager
     async def _execute(self, params) -> AsyncIterator[psycopg.AsyncRawCursor[MydbUser]]:
@@ -187,10 +218,42 @@ class Query_46242a02ffe365dc17851a034fdc1d30(Query):
             return runtime.get_one_row_or_none(await cur.fetchmany(2))
 
 
-class Query_4726b127b54ccecbe95840ebb93221c6_TaskStatusCount(Query):
+class Query_67ac0768d48a654b1a305124c92372e8(Query):
+    @asynccontextmanager
+    async def _execute(self, params) -> AsyncIterator[psycopg.AsyncRawCursor[None]]:
+        stmt = 'INSERT INTO projects (id, name, owner_id, settings)\nVALUES ($1, $2, $3, $4)'
+        async with (
+            mydb_connection() as conn,
+            psycopg.AsyncRawCursor(conn, row_factory=psycopg.rows.scalar_row) as cur,
+        ):
+            await cur.execute(stmt, params)
+            yield cur
+
+    async def execute(self, *, id: uuid.UUID, name: str, owner_id: uuid.UUID, settings: example.models.ProjectSettings) -> None:
+        async with self._execute((id, name, owner_id, runtime.serialize_json_param(example.models.ProjectSettings, settings, 'jsonb'))):
+            pass
+
+
+class Query_bd4c62c78a942bfd1f087f87a19f2743(Query):
+    @asynccontextmanager
+    async def _execute(self, params) -> AsyncIterator[psycopg.AsyncRawCursor[None]]:
+        stmt = 'INSERT INTO tasks (id, project_id, title, priority, assignee_id, metadata, due_date)\nVALUES ($1, $2, $3, $4, $5, $6, $7)'
+        async with (
+            mydb_connection() as conn,
+            psycopg.AsyncRawCursor(conn, row_factory=psycopg.rows.scalar_row) as cur,
+        ):
+            await cur.execute(stmt, params)
+            yield cur
+
+    async def execute(self, *, id: uuid.UUID, project_id: uuid.UUID, title: str, priority: MydbTaskPriority, assignee_id: uuid.UUID | None, metadata: example.models.TaskMetadata | None, due_date: datetime.date | None) -> None:
+        async with self._execute((id, project_id, title, priority, assignee_id, runtime.serialize_json_param(example.models.TaskMetadata, metadata, 'jsonb'), due_date)):
+            pass
+
+
+class Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount(Query):
     @asynccontextmanager
     async def _execute(self, params) -> AsyncIterator[psycopg.AsyncRawCursor[TaskStatusCount]]:
-        stmt = 'SELECT status, count(*) AS task_count FROM tasks WHERE project_id = $1 GROUP BY status ORDER BY status'
+        stmt = 'SELECT status, count(*) AS task_count\nFROM tasks WHERE project_id = $1\nGROUP BY status ORDER BY status'
         async with (
             mydb_connection() as conn,
             psycopg.AsyncRawCursor(conn, row_factory=psycopg.rows.class_row(TaskStatusCount)) as cur,
@@ -211,26 +274,10 @@ class Query_4726b127b54ccecbe95840ebb93221c6_TaskStatusCount(Query):
             return runtime.get_one_row_or_none(await cur.fetchmany(2))
 
 
-class Query_518fda848857eb991e98c204381f945c(Query):
-    @asynccontextmanager
-    async def _execute(self, params) -> AsyncIterator[psycopg.AsyncRawCursor[None]]:
-        stmt = 'INSERT INTO projects (id, name, owner_id, settings) VALUES ($1, $2, $3, $4)'
-        async with (
-            mydb_connection() as conn,
-            psycopg.AsyncRawCursor(conn, row_factory=psycopg.rows.scalar_row) as cur,
-        ):
-            await cur.execute(stmt, params)
-            yield cur
-
-    async def execute(self, *, id: uuid.UUID, name: str, owner_id: uuid.UUID, settings: myapp.models.ProjectSettings) -> None:
-        async with self._execute((id, name, owner_id, runtime.serialize_json_param(myapp.models.ProjectSettings, settings, 'jsonb'))):
-            pass
-
-
-class Query_ca1f790ce3eec6413c9e63c5ae05e2a9(Query):
+class Query_ce9822661c2a7e0e716755087929ebd9(Query):
     @asynccontextmanager
     async def _execute(self, params) -> AsyncIterator[psycopg.AsyncRawCursor[MydbTask]]:
-        stmt = 'SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at FROM tasks WHERE project_id = $1 AND ($2::task_status IS NULL OR status = $2)'
+        stmt = 'SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\nFROM tasks\nWHERE project_id = $1 AND ($2::task_status IS NULL OR status = $2)'
         async with (
             mydb_connection() as conn,
             psycopg.AsyncRawCursor(conn, row_factory=psycopg.rows.class_row(MydbTask)) as cur,
@@ -251,59 +298,21 @@ class Query_ca1f790ce3eec6413c9e63c5ae05e2a9(Query):
             return runtime.get_one_row_or_none(await cur.fetchmany(2))
 
 
-class Query_d270bc28e5b8b7becb60684dd230cbb3(Query):
-    @asynccontextmanager
-    async def _execute(self, params) -> AsyncIterator[psycopg.AsyncRawCursor[None]]:
-        stmt = 'INSERT INTO users (id, username, email) VALUES ($1, $2, $3)'
-        async with (
-            mydb_connection() as conn,
-            psycopg.AsyncRawCursor(conn, row_factory=psycopg.rows.scalar_row) as cur,
-        ):
-            await cur.execute(stmt, params)
-            yield cur
-
-    async def execute(self, *, id: uuid.UUID, username: str, email: str) -> None:
-        async with self._execute((id, username, email)):
-            pass
-
-
-class Query_fae15665a7afc2e5599ebf694ab4fb07(Query):
-    @asynccontextmanager
-    async def _execute(self, params) -> AsyncIterator[psycopg.AsyncRawCursor[None]]:
-        stmt = 'INSERT INTO tasks (id, project_id, title, priority, assignee_id, metadata, due_date) VALUES ($1, $2, $3, $4, $5, $6, $7)'
-        async with (
-            mydb_connection() as conn,
-            psycopg.AsyncRawCursor(conn, row_factory=psycopg.rows.scalar_row) as cur,
-        ):
-            await cur.execute(stmt, params)
-            yield cur
-
-    async def execute(self, *, id: uuid.UUID, project_id: uuid.UUID, title: str, priority: MydbTaskPriority, assignee_id: uuid.UUID | None, metadata: myapp.models.TaskMetadata | None, due_date: datetime.date | None) -> None:
-        async with self._execute((id, project_id, title, priority, assignee_id, runtime.serialize_json_param(myapp.models.TaskMetadata, metadata, 'jsonb'), due_date)):
-            pass
-
-
 _QUERIES: dict[str, type[Query]] = {
-    "SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at FROM tasks WHERE project_id = @project_id AND (sqlc.narg('status')::task_status IS NULL OR status = @status?)": Query_ca1f790ce3eec6413c9e63c5ae05e2a9,
-    'INSERT INTO projects (id, name, owner_id, settings) VALUES (@id, @name, @owner_id, @settings)': Query_518fda848857eb991e98c204381f945c,
-    'INSERT INTO tasks (id, project_id, title, priority, assignee_id, metadata, due_date) VALUES (@id, @project_id, @title, @priority, @assignee_id?, @metadata?, @due_date?)': Query_fae15665a7afc2e5599ebf694ab4fb07,
-    'INSERT INTO users (id, username, email) VALUES (@id, @username, @email)': Query_d270bc28e5b8b7becb60684dd230cbb3,
+    "\n        SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\n        FROM tasks\n        WHERE project_id = @project_id AND (sqlc.narg('status')::task_status IS NULL OR status = @status?)\n        ": Query_ce9822661c2a7e0e716755087929ebd9,
     'SELECT id FROM tasks WHERE project_id = @project_id AND title = @title': Query_07cbb3e5226e35adbd17171f38ab7216,
     'SELECT id, username, email, created_at FROM users ORDER BY created_at': Query_46242a02ffe365dc17851a034fdc1d30,
     'SELECT id, username, email, created_at FROM users WHERE id = @user_id': Query_41cb2f3cea216a76ba87b6ddb70e6be5,
-    'SELECT status, count(*) AS task_count FROM tasks WHERE project_id = @project_id GROUP BY status ORDER BY status': Query_4726b127b54ccecbe95840ebb93221c6_TaskStatusCount,
-    'UPDATE tasks SET status = @status WHERE id = @task_id': Query_12e061f7aa94bf484295ab0018520059
+    'UPDATE tasks SET status = @status WHERE id = @task_id': Query_12e061f7aa94bf484295ab0018520059,
+    '\n            INSERT INTO projects (id, name, owner_id, settings)\n            VALUES (@id, @name, @owner_id, @settings)\n            ': Query_67ac0768d48a654b1a305124c92372e8,
+    '\n            INSERT INTO users (id, username, email)\n            VALUES (@id, @username, @email)\n            ': Query_3ee53b6909da8b4496346dda36c9f442,
+    '\n        INSERT INTO tasks (id, project_id, title, priority, assignee_id, metadata, due_date)\n        VALUES (@id, @project_id, @title, @priority, @assignee_id?, @metadata?, @due_date?)\n        ': Query_bd4c62c78a942bfd1f087f87a19f2743,
+    '\n        SELECT status, count(*) AS task_count\n        FROM tasks WHERE project_id = @project_id\n        GROUP BY status ORDER BY status\n        ': Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount
 }
 
 
 @overload
-def mydb_sql(stmt: Literal["SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at FROM tasks WHERE project_id = @project_id AND (sqlc.narg('status')::task_status IS NULL OR status = @status?)"]) -> Query_ca1f790ce3eec6413c9e63c5ae05e2a9: ...
-@overload
-def mydb_sql(stmt: Literal['INSERT INTO projects (id, name, owner_id, settings) VALUES (@id, @name, @owner_id, @settings)']) -> Query_518fda848857eb991e98c204381f945c: ...
-@overload
-def mydb_sql(stmt: Literal['INSERT INTO tasks (id, project_id, title, priority, assignee_id, metadata, due_date) VALUES (@id, @project_id, @title, @priority, @assignee_id?, @metadata?, @due_date?)']) -> Query_fae15665a7afc2e5599ebf694ab4fb07: ...
-@overload
-def mydb_sql(stmt: Literal['INSERT INTO users (id, username, email) VALUES (@id, @username, @email)']) -> Query_d270bc28e5b8b7becb60684dd230cbb3: ...
+def mydb_sql(stmt: Literal["\n        SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\n        FROM tasks\n        WHERE project_id = @project_id AND (sqlc.narg('status')::task_status IS NULL OR status = @status?)\n        "]) -> Query_ce9822661c2a7e0e716755087929ebd9: ...
 @overload
 def mydb_sql(stmt: Literal['SELECT id FROM tasks WHERE project_id = @project_id AND title = @title']) -> Query_07cbb3e5226e35adbd17171f38ab7216: ...
 @overload
@@ -311,9 +320,15 @@ def mydb_sql(stmt: Literal['SELECT id, username, email, created_at FROM users OR
 @overload
 def mydb_sql(stmt: Literal['SELECT id, username, email, created_at FROM users WHERE id = @user_id']) -> Query_41cb2f3cea216a76ba87b6ddb70e6be5: ...
 @overload
-def mydb_sql(stmt: Literal['SELECT status, count(*) AS task_count FROM tasks WHERE project_id = @project_id GROUP BY status ORDER BY status'], row_type: Literal['TaskStatusCount']) -> Query_4726b127b54ccecbe95840ebb93221c6_TaskStatusCount: ...
-@overload
 def mydb_sql(stmt: Literal['UPDATE tasks SET status = @status WHERE id = @task_id']) -> Query_12e061f7aa94bf484295ab0018520059: ...
+@overload
+def mydb_sql(stmt: Literal['\n            INSERT INTO projects (id, name, owner_id, settings)\n            VALUES (@id, @name, @owner_id, @settings)\n            ']) -> Query_67ac0768d48a654b1a305124c92372e8: ...
+@overload
+def mydb_sql(stmt: Literal['\n            INSERT INTO users (id, username, email)\n            VALUES (@id, @username, @email)\n            ']) -> Query_3ee53b6909da8b4496346dda36c9f442: ...
+@overload
+def mydb_sql(stmt: Literal['\n        INSERT INTO tasks (id, project_id, title, priority, assignee_id, metadata, due_date)\n        VALUES (@id, @project_id, @title, @priority, @assignee_id?, @metadata?, @due_date?)\n        ']) -> Query_bd4c62c78a942bfd1f087f87a19f2743: ...
+@overload
+def mydb_sql(stmt: Literal['\n        SELECT status, count(*) AS task_count\n        FROM tasks WHERE project_id = @project_id\n        GROUP BY status ORDER BY status\n        '], row_type: Literal['TaskStatusCount']) -> Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount: ...
 @overload
 def mydb_sql(stmt: str) -> Query: ...
 

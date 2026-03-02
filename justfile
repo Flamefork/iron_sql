@@ -8,7 +8,7 @@ lint:
     uv run basedpyright
 
 test +args="":
-    uv run pytest -vv --color=yes --showlocals '{{ args }}'
+    uv run pytest -vv --color=yes --showlocals --durations=10 '{{ args }}'
 
 coverage:
     rm -rf .coverage/*
@@ -16,7 +16,7 @@ coverage:
     open .coverage/htmlcov/index.html
 
 generate-example:
-    uv run python example/generate.py
+    uv run python -m example.generate
 
 release version:
     uv version {{ version }}

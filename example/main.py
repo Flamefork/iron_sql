@@ -2,14 +2,15 @@ import asyncio
 import uuid
 from datetime import date
 
+from example.db.mydb import MydbTaskPriority
+from example.db.mydb import MydbTaskStatus
+from example.db.mydb import mydb_listen_session
+from example.db.mydb import mydb_notify
+from example.db.mydb import mydb_sql
+from example.db.mydb import mydb_transaction
+from example.models import ProjectSettings
+from example.models import TaskMetadata
 from iron_sql import NoRowsError
-
-from myapp.db.mydb import MydbTaskPriority
-from myapp.db.mydb import MydbTaskStatus
-from myapp.db.mydb import mydb_sql
-from myapp.db.mydb import mydb_transaction
-from myapp.models import ProjectSettings
-from myapp.models import TaskMetadata
 
 
 async def main() -> None:
@@ -19,14 +20,20 @@ async def main() -> None:
     # --- Transaction: create user + project atomically ---
     async with mydb_transaction():
         await mydb_sql(
-            "INSERT INTO users (id, username, email) VALUES (@id, @username, @email)"
+            """
+            INSERT INTO users (id, username, email)
+            VALUES (@id, @username, @email)
+            """
         ).execute(
             id=user_id,
             username="alice",
             email="alice@example.com",
         )
         await mydb_sql(
-            "INSERT INTO projects (id, name, owner_id, settings) VALUES (@id, @name, @owner_id, @settings)"
+            """
+            INSERT INTO projects (id, name, owner_id, settings)
+            VALUES (@id, @name, @owner_id, @settings)
+            """
         ).execute(
             id=project_id,
             name="iron_sql",
@@ -40,7 +47,10 @@ async def main() -> None:
     # --- Create tasks with enums, optional params, JSON metadata ---
     task1_id = uuid.uuid4()
     await mydb_sql(
-        "INSERT INTO tasks (id, project_id, title, priority, assignee_id, metadata, due_date) VALUES (@id, @project_id, @title, @priority, @assignee_id?, @metadata?, @due_date?)"
+        """
+        INSERT INTO tasks (id, project_id, title, priority, assignee_id, metadata, due_date)
+        VALUES (@id, @project_id, @title, @priority, @assignee_id?, @metadata?, @due_date?)
+        """
     ).execute(
         id=task1_id,
         project_id=project_id,
@@ -52,7 +62,10 @@ async def main() -> None:
     )
 
     await mydb_sql(
-        "INSERT INTO tasks (id, project_id, title, priority, assignee_id, metadata, due_date) VALUES (@id, @project_id, @title, @priority, @assignee_id?, @metadata?, @due_date?)"
+        """
+        INSERT INTO tasks (id, project_id, title, priority, assignee_id, metadata, due_date)
+        VALUES (@id, @project_id, @title, @priority, @assignee_id?, @metadata?, @due_date?)
+        """
     ).execute(
         id=uuid.uuid4(),
         project_id=project_id,
@@ -64,9 +77,7 @@ async def main() -> None:
     )
 
     # --- Update task status with enum ---
-    await mydb_sql(
-        "UPDATE tasks SET status = @status WHERE id = @task_id"
-    ).execute(
+    await mydb_sql("UPDATE tasks SET status = @status WHERE id = @task_id").execute(
         task_id=task1_id,
         status=MydbTaskStatus.IN_PROGRESS,
     )
@@ -85,7 +96,11 @@ async def main() -> None:
 
     # --- List tasks with optional status filter ---
     all_tasks = await mydb_sql(
-        "SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at FROM tasks WHERE project_id = @project_id AND (sqlc.narg('status')::task_status IS NULL OR status = @status?)"
+        """
+        SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at
+        FROM tasks
+        WHERE project_id = @project_id AND (sqlc.narg('status')::task_status IS NULL OR status = @status?)
+        """
     ).query_all_rows(
         project_id=project_id,
         status=None,
@@ -93,7 +108,11 @@ async def main() -> None:
     print(f"All tasks: {len(all_tasks)}")
 
     open_tasks = await mydb_sql(
-        "SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at FROM tasks WHERE project_id = @project_id AND (sqlc.narg('status')::task_status IS NULL OR status = @status?)"
+        """
+        SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at
+        FROM tasks
+        WHERE project_id = @project_id AND (sqlc.narg('status')::task_status IS NULL OR status = @status?)
+        """
     ).query_all_rows(
         project_id=project_id,
         status=MydbTaskStatus.OPEN,
@@ -102,7 +121,11 @@ async def main() -> None:
 
     # --- Custom row_type: count by status ---
     counts = await mydb_sql(
-        "SELECT status, count(*) AS task_count FROM tasks WHERE project_id = @project_id GROUP BY status ORDER BY status",
+        """
+        SELECT status, count(*) AS task_count
+        FROM tasks WHERE project_id = @project_id
+        GROUP BY status ORDER BY status
+        """,
         row_type="TaskStatusCount",
     ).query_all_rows(project_id=project_id)
     for row in counts:
@@ -124,6 +147,15 @@ async def main() -> None:
         ).query_single_row(user_id=uuid.uuid4())
     except NoRowsError:
         print("User not found (expected)")
+
+    # --- LISTEN/NOTIFY ---
+    async with mydb_listen_session("task_updates") as task_ids:
+        await mydb_notify("task_updates", str(task1_id))
+
+        async with asyncio.timeout(5):
+            async for task_id in task_ids:
+                print(f"Received: {task_id}")
+                break
 
 
 asyncio.run(main())

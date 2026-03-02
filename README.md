@@ -55,6 +55,7 @@ The `sqlc` binary is bundled automatically via the `sqlc` Python package.
    This writes `myapp/db/mydb.py` containing:
    - a connection pool singleton,
    - `*_connection()` and `*_transaction()` context managers,
+   - `*_listen_session(channel)` and `*_notify(channel, payload="")` helpers,
    - dataclasses for multi-column results (deduplicated by table),
    - `StrEnum` classes for PostgreSQL enums,
    - a query class per statement with typed methods,
@@ -69,6 +70,7 @@ The `sqlc` binary is bundled automatically via the `sqlc` Python package.
 
 ## Runtime Highlights
 - `ConnectionPool` opens lazily and reopens after `close()`, with `ContextVar`-based connection reuse for nested contexts.
+- `*_listen_session()` uses a dedicated pooled connection and doesn't reuse `ContextVar` transaction connections.
 - `query_single_row()` raises `NoRowsError`; `query_optional_row()` returns `None`. Both raise `TooManyRowsError` on 2+ rows.
 - JSONB params are sent with `pgjson.Jsonb`; JSON with `pgjson.Json`. Scalar row factories validate types at runtime.
 - `json_validated` decorator applies Pydantic model validation to dataclass fields on construction.
