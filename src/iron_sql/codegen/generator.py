@@ -3,6 +3,7 @@ import dataclasses
 import hashlib
 import importlib
 import logging
+import re
 import warnings
 from collections import defaultdict
 from collections.abc import Callable
@@ -186,6 +187,24 @@ def collect_used_enums(sqlc_res: SQLCResult) -> set[tuple[str, str]]:
     }
 
 
+def map_sqlc_error(
+    error: str,
+    block_starts: list[tuple[int, str]],
+    all_locations: dict[str, list[str]],
+) -> str:
+    def replace(m: re.Match[str]) -> str:
+        line = int(m.group(1))
+        name = next((n for start, n in reversed(block_starts) if start <= line), None)
+        if name is None:
+            return m.group(0)
+        locations = all_locations.get(name)
+        if not locations:
+            return m.group(0)
+        return f"{', '.join(locations)}:"
+
+    return re.sub(r"queries\.sql:(\d+)(?::\d+)?:", replace, error)
+
+
 def generate_sql_package(  # noqa: PLR0913, PLR0914
     *,
     schema_path: Path,
@@ -200,21 +219,14 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
     src_path: Path = Path(),
     tempdir_path: Path | None = None,
 ) -> bool:
-    dsn_import_package, dsn_import_path = dsn_import.split(":")
-
-    package_name = package_full_name.split(".")[-1]  # noqa: PLC0207
+    package_name = package_full_name.rsplit(".", maxsplit=1)[-1]
     sql_fn_name = f"{package_name}_sql"
 
-    target_package_path = src_path / f"{package_full_name.replace('.', '/')}.py"
+    queries, all_locations = collect_queries(src_path, sql_fn_name)
 
-    queries = list(find_all_queries(src_path, sql_fn_name))
-    validate_stmt_has_single_row_type(queries)
-    queries = list({q.name: q for q in queries}.values())
+    dsn, dsn_import_package, dsn_import_path = resolve_dsn(dsn_import)
 
-    dsn_package = importlib.import_module(dsn_import_package)
-    dsn = eval(dsn_import_path, vars(dsn_package))  # noqa: S307
-
-    sqlc_res = run_sqlc(
+    sqlc_res, block_starts = run_sqlc(
         src_path / schema_path,
         [(q.name, q.stmt) for q in queries],
         dsn=dsn,
@@ -223,63 +235,13 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
     )
 
     if sqlc_res.error:
-        logger.error("Error running SQLC:\n%s", sqlc_res.error)
+        mapped = map_sqlc_error(sqlc_res.error, block_starts, all_locations)
+        logger.error(f"Error running SQLC:\n{mapped}")
         return False
 
-    json_import_block = ""
-    json_col_overrides: dict[tuple[str, str], str] = {}
-
-    if json_model_overrides:
-        json_compatible_types = {"json", "jsonb", "text", "varchar"}
-        col_types = {
-            (table.rel.name, column.name): column.type.name.removeprefix("pg_catalog.")
-            for schema in sqlc_res.catalog.schemas
-            for table in schema.tables
-            for column in table.columns
-        }
-        tables = {table for table, _ in col_types}
-
-        parsed: dict[tuple[str, str], tuple[str, str]] = {}
-        for key, import_path in json_model_overrides.items():
-            table_name, sep, col_name = key.partition(".")
-            if not sep:
-                msg = f"json_model_overrides key must be 'table.column', got: {key!r}"
-                raise ValueError(msg)
-            if table_name not in tables:
-                msg = f"json_model_overrides: table {table_name!r} not found in catalog"
-                raise ValueError(msg)
-            if (table_name, col_name) not in col_types:
-                msg = (
-                    f"json_model_overrides: column {col_name!r} "
-                    f"not found in table {table_name!r}"
-                )
-                raise ValueError(msg)
-
-            db_type = col_types[table_name, col_name]
-            if db_type not in json_compatible_types:
-                msg = (
-                    f"json_model_overrides: column "
-                    f"{table_name}.{col_name} has type "
-                    f"{db_type!r}, expected one of "
-                    f"{json_compatible_types}"
-                )
-                raise ValueError(msg)
-
-            module_path, sep, class_name = import_path.partition(":")
-            if not sep:
-                msg = (
-                    "json_model_overrides value must be "
-                    f"'module:Class', got: {import_path!r}"
-                )
-                raise ValueError(msg)
-
-            parsed[table_name, col_name] = (module_path, class_name)
-
-        modules = sorted({module for module, _ in parsed.values()})
-        json_import_block = "\n" + "\n".join(f"import {m}" for m in modules)
-        json_col_overrides = {
-            key: f"{module}.{cls}" for key, (module, cls) in parsed.items()
-        }
+    json_import_block, json_col_overrides = resolve_json_model_overrides(
+        json_model_overrides or {}, sqlc_res.catalog
+    )
 
     resolver = TypeResolver(
         catalog=sqlc_res.catalog,
@@ -297,18 +259,79 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
         resolver,
     )
 
-    entities = [render_entity(e.name, e.column_specs) for e in ordered_entities]
+    entities = sorted(render_entity(e.name, e.column_specs) for e in ordered_entities)
 
     used_enums = collect_used_enums(sqlc_res)
 
-    enums = [
+    enums = sorted(
         render_enum_class(e, package_name, to_pascal_fn, to_snake_fn)
         for schema in sqlc_res.catalog.schemas
         for e in schema.enums
         if (schema.name, e.name) in used_enums
+    )
+
+    query_classes = render_query_classes(
+        sqlc_res.queries, queries, resolver, result_types, all_locations
+    )
+
+    query_overloads = [
+        render_query_overload(sql_fn_name, q.name, q.stmt, q.row_type) for q in queries
     ]
 
-    query_classes = [
+    query_dict_entries = [render_query_dict_entry(q.name, q.stmt) for q in queries]
+
+    target_package_path = src_path / f"{package_full_name.replace('.', '/')}.py"
+
+    new_content = render_package(
+        dsn_import_package,
+        dsn_import_path,
+        package_name,
+        sql_fn_name,
+        entities,
+        enums,
+        query_classes,
+        query_overloads,
+        query_dict_entries,
+        application_name,
+        json_import_block,
+    )
+    changed = write_if_changed(target_package_path, new_content + "\n")
+    if changed:
+        logger.info(f"Generated SQL package {package_full_name}")
+    return changed
+
+
+def collect_queries(
+    src_path: Path, sql_fn_name: str
+) -> tuple[list["CodeQuery"], defaultdict[str, list[str]]]:
+    raw = list(find_all_queries(src_path, sql_fn_name))
+    validate_stmt_has_single_row_type(raw)
+    all_locations: defaultdict[str, list[str]] = defaultdict(list)
+    first_occurrence: dict[str, CodeQuery] = {}
+    for q in raw:
+        all_locations[q.name].append(q.location)
+        if q.name not in first_occurrence:
+            first_occurrence[q.name] = q
+    queries = sorted(first_occurrence.values(), key=lambda q: (q.file, q.lineno))
+    return queries, all_locations
+
+
+def resolve_dsn(dsn_import: str) -> tuple[str, str, str]:
+    package_name, attr_path = dsn_import.split(":")
+    mod = importlib.import_module(package_name)
+    dsn: str = eval(attr_path, vars(mod))  # noqa: S307
+    return dsn, package_name, attr_path
+
+
+def render_query_classes(
+    sqlc_queries: tuple[Query, ...],
+    queries: list["CodeQuery"],
+    resolver: TypeResolver,
+    result_types: dict[str, str],
+    all_locations: defaultdict[str, list[str]],
+) -> list[str]:
+    query_order = {q.name: i for i, q in enumerate(queries)}
+    return [
         render_query_class(
             q.name,
             q.text,
@@ -327,33 +350,67 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
                 if len(q.columns) == 1
                 else None
             ),
+            all_locations[q.name],
         )
-        for q in sqlc_res.queries
+        for q in sorted(sqlc_queries, key=lambda q: query_order[q.name])
     ]
 
-    query_overloads = [
-        render_query_overload(sql_fn_name, q.name, q.stmt, q.row_type) for q in queries
-    ]
 
-    query_dict_entries = [render_query_dict_entry(q.name, q.stmt) for q in queries]
+def resolve_json_model_overrides(
+    overrides: dict[str, str], catalog: Catalog
+) -> tuple[str, dict[tuple[str, str], str]]:
+    if not overrides:
+        return "", {}
 
-    new_content = render_package(
-        dsn_import_package,
-        dsn_import_path,
-        package_name,
-        sql_fn_name,
-        sorted(entities),
-        sorted(enums),
-        sorted(query_classes),
-        sorted(query_overloads),
-        sorted(query_dict_entries),
-        application_name,
-        json_import_block,
-    )
-    changed = write_if_changed(target_package_path, new_content + "\n")
-    if changed:
-        logger.info(f"Generated SQL package {package_full_name}")
-    return changed
+    json_compatible_types = {"json", "jsonb", "text", "varchar"}
+    col_types = {
+        (table.rel.name, column.name): column.type.name.removeprefix("pg_catalog.")
+        for schema in catalog.schemas
+        for table in schema.tables
+        for column in table.columns
+    }
+    tables = {table for table, _ in col_types}
+
+    parsed: dict[tuple[str, str], tuple[str, str]] = {}
+    for key, import_path in overrides.items():
+        table_name, sep, col_name = key.partition(".")
+        if not sep:
+            msg = f"json_model_overrides key must be 'table.column', got: {key!r}"
+            raise ValueError(msg)
+        if table_name not in tables:
+            msg = f"json_model_overrides: table {table_name!r} not found in catalog"
+            raise ValueError(msg)
+        if (table_name, col_name) not in col_types:
+            msg = (
+                f"json_model_overrides: column {col_name!r} "
+                f"not found in table {table_name!r}"
+            )
+            raise ValueError(msg)
+
+        db_type = col_types[table_name, col_name]
+        if db_type not in json_compatible_types:
+            msg = (
+                f"json_model_overrides: column "
+                f"{table_name}.{col_name} has type "
+                f"{db_type!r}, expected one of "
+                f"{json_compatible_types}"
+            )
+            raise ValueError(msg)
+
+        module_path, sep, class_name = import_path.partition(":")
+        if not sep:
+            msg = (
+                "json_model_overrides value must be "
+                f"'module:Class', got: {import_path!r}"
+            )
+            raise ValueError(msg)
+
+        parsed[table_name, col_name] = (module_path, class_name)
+
+    modules = sorted({module for module, _ in parsed.values()})
+    import_block = "\n" + "\n".join(f"import {m}" for m in modules)
+    col_overrides = {key: f"{module}.{cls}" for key, (module, cls) in parsed.items()}
+    return import_block, col_overrides
 
 
 def render_package(  # noqa: PLR0913, PLR0917
@@ -562,7 +619,8 @@ def render_query_class(
     query_params: list[ParamSpec],
     result: str,
     columns_num: int,
-    scalar_json_type: str | None = None,
+    scalar_json_type: str | None,
+    locations: list[str],
 ) -> str:
     query_params = deduplicate_params(query_params)
 
@@ -631,6 +689,7 @@ async def execute({", ".join(query_fn_params)}) -> None:
     return f"""
 
 class {query_name}(Query[{result}]):
+    # See: {", ".join(locations)}
     _stmt = psycopg.sql.SQL({stmt!r})
     _row_factory = staticmethod({row_factory})
 
@@ -767,7 +826,12 @@ def find_fn_calls(
         content = path.read_text(encoding="utf-8")
         if fn_name not in content:
             continue
-        for node in ast.walk(ast.parse(content, filename=str(path))):
+        try:
+            tree = ast.parse(content, filename=str(path))
+        except SyntaxError as exc:
+            msg = f"Failed to parse {path}: {exc.msg} (line {exc.lineno})"
+            raise SyntaxError(msg) from exc
+        for node in ast.walk(tree):
             match node:
                 case ast.Call(func=ast.Name(id=id)) if id == fn_name:
                     yield path, node.lineno, node
@@ -817,11 +881,15 @@ def find_all_queries(src_path: Path, sql_fn_name: str) -> Iterator[CodeQuery]:
 
 
 def validate_stmt_has_single_row_type(queries: list[CodeQuery]) -> None:
-    row_type_by_stmt: dict[str, str | None] = {}
+    first_by_stmt: dict[str, CodeQuery] = {}
     for query in queries:
-        if query.stmt in row_type_by_stmt:
-            if query.row_type != row_type_by_stmt[query.stmt]:
-                msg = f"row_type conflict (existing={row_type_by_stmt[query.stmt]!r})"
+        if query.stmt in first_by_stmt:
+            first = first_by_stmt[query.stmt]
+            if query.row_type != first.row_type:
+                msg = (
+                    f"row_type conflict: {first.location} has {first.row_type!r},"
+                    f" {query.location} has {query.row_type!r}"
+                )
                 raise ValueError(msg)
         else:
-            row_type_by_stmt[query.stmt] = query.row_type
+            first_by_stmt[query.stmt] = query

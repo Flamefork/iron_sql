@@ -1,5 +1,4 @@
 import asyncio
-from collections.abc import AsyncIterator
 
 import psycopg
 import pytest
@@ -50,13 +49,6 @@ async def test_generated_listen_session_does_not_block_context_queries(
 # =============================================================================
 # Integration tests: execute_listen / execute_unlisten
 # =============================================================================
-
-
-@pytest.fixture
-async def pool(pg_dsn: str) -> AsyncIterator[ConnectionPool]:
-    p = ConnectionPool(pg_dsn, name="listen_notify_test")
-    yield p
-    await p.close()
 
 
 async def test_execute_listen_unlisten(pool: ConnectionPool) -> None:

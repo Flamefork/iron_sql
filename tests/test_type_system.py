@@ -2,12 +2,20 @@ import datetime
 import ipaddress
 import warnings
 from enum import StrEnum
+from typing import Any
 from typing import get_args
 
 import pytest
 
 from iron_sql.codegen import UnknownSQLTypeWarning
 from tests.conftest import ProjectBuilder
+
+
+def assert_return_types(query: Any, expected: set[type]) -> None:
+    ret = type(query).query_single_row.__annotations__["return"]
+    ret_args = get_args(ret)
+    actual = {a for a in ret_args if a is not type(None)} if ret_args else {ret}
+    assert actual == expected
 
 
 async def test_enum_generation(test_project: ProjectBuilder) -> None:
@@ -67,17 +75,12 @@ async def test_entity_generation_with_enum(test_project: ProjectBuilder) -> None
 
     assert entity_cls.__annotations__["status"] is enum_cls
 
-    type_name = (
-        enum_cls.split(".")[-1] if isinstance(enum_cls, str) else enum_cls.__name__
-    )
-    expected = f"Sequence[{type_name}]"
-    annotation_str = str(entity_cls.__annotations__["tags"]).replace(
-        "testapp_test_entity_generation_with_enum.testdb.", ""
-    )
-    assert expected in annotation_str
-    assert (enum_cls if isinstance(enum_cls, str) else enum_cls.__name__) in str(
-        entity_cls.__annotations__["tags"]
-    )
+    tags_annotation = entity_cls.__annotations__["tags"]
+    tag_args = get_args(tags_annotation)
+    # Sequence[EnumCls] | None — unwrap the union
+    seq_type = next(a for a in tag_args if a is not type(None))
+    (inner_type,) = get_args(seq_type)
+    assert inner_type is enum_cls
 
 
 async def test_unused_enum_skipped(test_project: ProjectBuilder) -> None:
@@ -276,34 +279,20 @@ async def test_standard_type_mapping_network(test_project: ProjectBuilder) -> No
 
     mod = test_project.generate()
 
-    inet_query = mod.testdb_sql(inet_stmt)
-    inet_ret = type(inet_query).query_single_row.__annotations__["return"]
-    inet_args = {a for a in get_args(inet_ret) if a is not type(None)}
-    assert inet_args == {
+    inet_types = {
         ipaddress.IPv4Address,
         ipaddress.IPv6Address,
         ipaddress.IPv4Interface,
         ipaddress.IPv6Interface,
     }
+    inet_query = mod.testdb_sql(inet_stmt)
+    assert_return_types(inet_query, inet_types)
+    assert isinstance(await inet_query.query_single_row(), tuple(inet_types))
 
-    inet_val = await inet_query.query_single_row()
-    assert isinstance(
-        inet_val,
-        (
-            ipaddress.IPv4Address,
-            ipaddress.IPv6Address,
-            ipaddress.IPv4Interface,
-            ipaddress.IPv6Interface,
-        ),
-    )
-
+    cidr_types = {ipaddress.IPv4Network, ipaddress.IPv6Network}
     cidr_query = mod.testdb_sql(cidr_stmt)
-    cidr_ret = type(cidr_query).query_single_row.__annotations__["return"]
-    cidr_args = {a for a in get_args(cidr_ret) if a is not type(None)}
-    assert cidr_args == {ipaddress.IPv4Network, ipaddress.IPv6Network}
-
-    cidr_val = await cidr_query.query_single_row()
-    assert isinstance(cidr_val, (ipaddress.IPv4Network, ipaddress.IPv6Network))
+    assert_return_types(cidr_query, cidr_types)
+    assert isinstance(await cidr_query.query_single_row(), tuple(cidr_types))
 
 
 async def test_standard_type_mapping_interval(test_project: ProjectBuilder) -> None:
@@ -314,17 +303,8 @@ async def test_standard_type_mapping_interval(test_project: ProjectBuilder) -> N
     mod = test_project.generate()
 
     interval_query = mod.testdb_sql(interval_stmt)
-    interval_ret = type(interval_query).query_single_row.__annotations__["return"]
-    interval_ret_args = get_args(interval_ret)
-    interval_args = (
-        {a for a in interval_ret_args if a is not type(None)}
-        if interval_ret_args
-        else {interval_ret}
-    )
-    assert interval_args == {datetime.timedelta}
-
-    interval_val = await interval_query.query_single_row()
-    assert isinstance(interval_val, datetime.timedelta)
+    assert_return_types(interval_query, {datetime.timedelta})
+    assert isinstance(await interval_query.query_single_row(), datetime.timedelta)
 
 
 async def test_standard_type_mapping_text_variants(
@@ -342,13 +322,8 @@ async def test_standard_type_mapping_text_variants(
 
     for stmt in (bpchar_stmt, char_stmt, name_stmt):
         q = mod.testdb_sql(stmt)
-        ret = type(q).query_single_row.__annotations__["return"]
-        ret_args = get_args(ret)
-        args = {a for a in ret_args if a is not type(None)} if ret_args else {ret}
-        assert args == {str}
-
-        val = await q.query_single_row()
-        assert isinstance(val, str)
+        assert_return_types(q, {str})
+        assert isinstance(await q.query_single_row(), str)
 
 
 async def test_type_overrides_suppress_unknown_warning_and_override_annotation(
@@ -373,10 +348,7 @@ async def test_type_overrides_suppress_unknown_warning_and_override_annotation(
     assert not unknown_type_warnings
 
     q = mod.testdb_sql(stmt)
-    ret = type(q).query_single_row.__annotations__["return"]
-    ret_args = get_args(ret)
-    args = {a for a in ret_args if a is not type(None)} if ret_args else {ret}
-    assert args == {int}
+    assert_return_types(q, {int})
 
     val = await q.query_single_row()
     assert val == 1

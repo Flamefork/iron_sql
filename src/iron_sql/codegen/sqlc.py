@@ -139,7 +139,7 @@ def run_sqlc(
     dsn: str | None,
     debug_path: Path | None = None,
     tempdir_path: Path | None = None,
-) -> SQLCResult:
+) -> tuple[SQLCResult, list[tuple[int, str]]]:
     if not schema_path.exists():
         msg = f"Schema file not found: {schema_path}"
         raise ValueError(msg)
@@ -148,7 +148,7 @@ def run_sqlc(
         return SQLCResult(
             catalog=Catalog(default_schema="", name="", schemas=()),
             queries=(),
-        )
+        ), []
 
     queries = list({q[0]: q for q in queries}.values())
 
@@ -156,13 +156,15 @@ def run_sqlc(
         dir=str(tempdir_path) if tempdir_path else None
     ) as tempdir:
         queries_path = Path(tempdir) / "queries.sql"
-        queries_path.write_text(
-            "\n\n".join(
-                f"-- name: {name} :exec\n{preprocess_sql(stmt)};"
-                for name, stmt in queries
-            ),
-            encoding="utf-8",
-        )
+        block_starts: list[tuple[int, str]] = []
+        blocks: list[str] = []
+        current_line = 1
+        for name, stmt in queries:
+            block = f"-- name: {name} :exec\n{preprocess_sql(stmt)};"
+            block_starts.append((current_line, name))
+            current_line += block.count("\n") + 2
+            blocks.append(block)
+        queries_path.write_text("\n\n".join(blocks), encoding="utf-8")
 
         (Path(tempdir) / "schema.sql").symlink_to(schema_path.absolute())
 
@@ -206,8 +208,10 @@ def run_sqlc(
                 error=sqlc_run_result.stderr.decode().strip(),
                 catalog=Catalog(default_schema="", name="", schemas=()),
                 queries=(),
-            )
-        return SQLCResult.model_validate_json(json_out_path.read_text(encoding="utf-8"))
+            ), block_starts
+        return SQLCResult.model_validate_json(
+            json_out_path.read_text(encoding="utf-8")
+        ), block_starts
 
 
 def preprocess_sql(stmt: str) -> str:
