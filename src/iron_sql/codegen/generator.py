@@ -308,6 +308,8 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
         if (schema.name, e.name) in used_enums
     ]
 
+    locations = {q.name: q.location for q in queries}
+
     query_classes = [
         render_query_class(
             q.name,
@@ -327,6 +329,7 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
                 if len(q.columns) == 1
                 else None
             ),
+            locations[q.name],
         )
         for q in sqlc_res.queries
     ]
@@ -562,7 +565,8 @@ def render_query_class(
     query_params: list[ParamSpec],
     result: str,
     columns_num: int,
-    scalar_json_type: str | None = None,
+    scalar_json_type: str | None,
+    location: str,
 ) -> str:
     query_params = deduplicate_params(query_params)
 
@@ -631,6 +635,7 @@ async def execute({", ".join(query_fn_params)}) -> None:
     return f"""
 
 class {query_name}(Query[{result}]):
+    # See: {location}
     _stmt = psycopg.sql.SQL({stmt!r})
     _row_factory = staticmethod({row_factory})
 
