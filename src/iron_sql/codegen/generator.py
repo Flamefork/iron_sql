@@ -3,6 +3,7 @@ import dataclasses
 import hashlib
 import importlib
 import logging
+import re
 import warnings
 from collections import defaultdict
 from collections.abc import Callable
@@ -186,6 +187,24 @@ def collect_used_enums(sqlc_res: SQLCResult) -> set[tuple[str, str]]:
     }
 
 
+def map_sqlc_error(
+    error: str,
+    block_starts: list[tuple[int, str]],
+    all_locations: dict[str, list[str]],
+) -> str:
+    def replace(m: re.Match[str]) -> str:
+        line = int(m.group(1))
+        name = next((n for start, n in reversed(block_starts) if start <= line), None)
+        if name is None:
+            return m.group(0)
+        locations = all_locations.get(name)
+        if not locations:
+            return m.group(0)
+        return f"{', '.join(locations)}:"
+
+    return re.sub(r"queries\.sql:(\d+)(?::\d+)?:", replace, error)
+
+
 def generate_sql_package(  # noqa: PLR0913, PLR0914
     *,
     schema_path: Path,
@@ -224,7 +243,7 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
     dsn_package = importlib.import_module(dsn_import_package)
     dsn = eval(dsn_import_path, vars(dsn_package))  # noqa: S307
 
-    sqlc_res = run_sqlc(
+    sqlc_res, block_starts = run_sqlc(
         src_path / schema_path,
         [(q.name, q.stmt) for q in queries],
         dsn=dsn,
@@ -233,7 +252,8 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
     )
 
     if sqlc_res.error:
-        logger.error("Error running SQLC:\n%s", sqlc_res.error)
+        mapped = map_sqlc_error(sqlc_res.error, block_starts, all_locations)
+        logger.error("Error running SQLC:\n%s", mapped)
         return False
 
     json_import_block = ""

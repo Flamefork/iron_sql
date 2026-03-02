@@ -1,4 +1,5 @@
 import importlib.resources
+import logging
 import re
 import sys
 from pathlib import Path
@@ -124,6 +125,28 @@ def test_sqlc_failure_returns_false(test_project: ProjectBuilder) -> None:
     assert test_project.generate_no_import() is False
 
 
+def test_sqlc_error_maps_to_source_location(
+    test_project: ProjectBuilder, caplog: pytest.LogCaptureFixture
+) -> None:
+    test_project.set_queries_source(
+        """\
+from typing import Any
+def testdb_sql(q: str, **kwargs: Any) -> Any: ...
+
+q1 = testdb_sql("SELECT id FROM users")
+q2 = testdb_sql("SELECT nonexistent_column FROM users")
+q3 = testdb_sql("SELECT nonexistent_column FROM users")
+"""
+    )
+    with caplog.at_level(logging.ERROR, logger="iron_sql.codegen.generator"):
+        result = test_project.generate_no_import()
+
+    assert result is False
+    assert "queries.sql" not in caplog.text
+    assert "queries.py:5" in caplog.text
+    assert "queries.py:6" in caplog.text
+
+
 def test_result_shapes_validation_error_zero_cols(test_project: ProjectBuilder) -> None:
     test_project.add_query(
         "insert_bad", "INSERT INTO users (id, username) VALUES ($1, $2)", row_type="Bad"
@@ -242,10 +265,11 @@ def test_run_sqlc_missing_schema() -> None:
 def test_run_sqlc_no_queries(tmp_path: Path) -> None:
     schema_path = tmp_path / "schema.sql"
     schema_path.touch()
-    result = run_sqlc(
+    result, block_starts = run_sqlc(
         schema_path=schema_path,
         queries=[],
         dsn="postgres://",
     )
     assert result.queries == ()
     assert result.catalog.schemas == ()
+    assert block_starts == []
