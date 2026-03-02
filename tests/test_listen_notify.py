@@ -130,8 +130,7 @@ async def test_listen_rejects_connection_with_active_listen_subscriptions(
         with pytest.raises(
             RuntimeError,
             match=(
-                "listen\\(\\) requires a connection without active LISTEN"
-                " subscriptions"
+                "listen\\(\\) requires a connection without active LISTEN subscriptions"
             ),
         ):
             async with listen(listen_conn, channel):
@@ -155,8 +154,7 @@ async def test_listen_rejects_connection_with_active_listen_subscriptions(
         with pytest.raises(
             RuntimeError,
             match=(
-                "listen\\(\\) requires a connection without active LISTEN"
-                " subscriptions"
+                "listen\\(\\) requires a connection without active LISTEN subscriptions"
             ),
         ):
             async with listen(listen_conn, "test_single_listener_guard_2"):
