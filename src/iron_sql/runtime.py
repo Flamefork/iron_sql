@@ -1,4 +1,5 @@
 import contextlib
+import itertools
 import types
 from collections.abc import AsyncGenerator
 from collections.abc import AsyncIterator
@@ -14,9 +15,9 @@ from typing import overload
 
 import psycopg
 import psycopg.rows
+import psycopg.sql
+import psycopg.types.json
 import psycopg_pool
-from psycopg import sql
-from psycopg.types import json as pgjson
 from pydantic import TypeAdapter
 
 _adapter_cache: dict[object, TypeAdapter[object]] = {}
@@ -63,21 +64,25 @@ async def listen(
 async def notify(conn: psycopg.AsyncConnection, channel: str, payload: str) -> None:
     _validate_channel(channel)
     await conn.execute(
-        sql.SQL("NOTIFY {}, {}").format(
-            sql.Identifier(channel),
-            sql.Literal(payload),
+        psycopg.sql.SQL("NOTIFY {}, {}").format(
+            psycopg.sql.Identifier(channel),
+            psycopg.sql.Literal(payload),
         )
     )
 
 
 async def execute_listen(conn: psycopg.AsyncConnection, channel: str) -> None:
     _validate_channel(channel)
-    await conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(channel)))
+    await conn.execute(
+        psycopg.sql.SQL("LISTEN {}").format(psycopg.sql.Identifier(channel))
+    )
 
 
 async def execute_unlisten(conn: psycopg.AsyncConnection, channel: str) -> None:
     _validate_channel(channel)
-    await conn.execute(sql.SQL("UNLISTEN {}").format(sql.Identifier(channel)))
+    await conn.execute(
+        psycopg.sql.SQL("UNLISTEN {}").format(psycopg.sql.Identifier(channel))
+    )
 
 
 async def _has_active_listen_subscriptions(conn: psycopg.AsyncConnection) -> bool:
@@ -94,6 +99,26 @@ def _validate_channel(name: str) -> None:
     if not name:
         msg = "Channel name must not be empty"
         raise ValueError(msg)
+
+
+_cursor_seq = itertools.count()
+
+
+def next_cursor_name() -> str:
+    return f"_c{next(_cursor_seq)}"
+
+
+@asynccontextmanager
+async def ensure_transaction(conn: psycopg.AsyncConnection) -> AsyncIterator[None]:
+    match conn.info.transaction_status:
+        case psycopg.pq.TransactionStatus.IDLE:
+            async with conn.transaction():
+                yield
+        case psycopg.pq.TransactionStatus.INTRANS:
+            yield
+        case status:
+            msg = f"Cannot use server-side cursor: connection is in {status.name} state"
+            raise psycopg.InterfaceError(msg)
 
 
 class ConnectionPool:
@@ -196,9 +221,9 @@ def serialize_json_param(typ: object, value: object, db_type: str) -> object:
     adapter = get_adapter(typ)
     match db_type:
         case "json":
-            return pgjson.Json(adapter.dump_python(value, mode="json"))
+            return psycopg.types.json.Json(adapter.dump_python(value, mode="json"))
         case "jsonb":
-            return pgjson.Jsonb(adapter.dump_python(value, mode="json"))
+            return psycopg.types.json.Jsonb(adapter.dump_python(value, mode="json"))
         case _:
             return adapter.dump_json(value).decode()
 

@@ -20,6 +20,7 @@ The `sqlc` binary is bundled automatically via the `sqlc` Python package.
 - **Query discovery.** `generate_sql_package` scans your codebase for calls like `<package>_sql("SELECT ...")`, runs `sqlc` for type analysis, and emits a typed module.
 - **Strong typing.** Generated dataclasses and method signatures flow through your IDE and type checker.
 - **Async runtime.** Built on `psycopg` v3 with pooled connections, context-based connection reuse, and transaction helpers.
+- **Streaming.** `query_stream()` uses server-side cursors for memory-efficient iteration over large result sets.
 - **Safe by default.** Helper methods enforce expected row counts instead of returning silent `None`.
 
 ## Package Layout
@@ -72,7 +73,8 @@ The `sqlc` binary is bundled automatically via the `sqlc` Python package.
 - `ConnectionPool` opens lazily and reopens after `close()`, with `ContextVar`-based connection reuse for nested contexts.
 - `*_listen_session()` uses a dedicated pooled connection and doesn't reuse `ContextVar` transaction connections.
 - `query_single_row()` raises `NoRowsError`; `query_optional_row()` returns `None`. Both raise `TooManyRowsError` on 2+ rows.
-- JSONB params are sent with `pgjson.Jsonb`; JSON with `pgjson.Json`. Scalar row factories validate types at runtime.
+- `query_stream()` returns an async context manager yielding an `AsyncIterator`; uses server-side cursors with automatic transaction management.
+- JSONB params are sent with `psycopg.types.json.Jsonb`; JSON with `psycopg.types.json.Json`. Scalar row factories validate types at runtime.
 - `json_validated` decorator applies Pydantic model validation to dataclass fields on construction.
 
 ## Example

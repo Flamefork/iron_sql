@@ -148,6 +148,20 @@ async def main() -> None:
     except NoRowsError:
         print("User not found (expected)")
 
+    # --- Streaming: iterate tasks one by one ---
+    async with mydb_sql(
+        """
+        SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at
+        FROM tasks
+        WHERE project_id = @project_id AND (sqlc.narg('status')::task_status IS NULL OR status = @status?)
+        """
+    ).query_stream(
+        project_id=project_id,
+        status=None,
+    ) as tasks:
+        async for task in tasks:
+            print(f"Streamed task: {task.title} ({task.status})")
+
     # --- LISTEN/NOTIFY ---
     async with mydb_listen_session("task_updates") as task_ids:
         await mydb_notify("task_updates", str(task1_id))

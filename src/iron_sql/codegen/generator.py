@@ -55,9 +55,9 @@ class ParamSpec:
 
         match self.db_type:
             case "json":
-                expr = f"pgjson.Json({self.name})"
+                expr = f"psycopg.types.json.Json({self.name})"
             case "jsonb":
-                expr = f"pgjson.Jsonb({self.name})"
+                expr = f"psycopg.types.json.Jsonb({self.name})"
             case _:
                 return self.name
 
@@ -312,7 +312,6 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
         render_query_class(
             q.name,
             q.text,
-            package_name,
             [
                 resolver.param_spec(
                     p.column,
@@ -385,16 +384,20 @@ import uuid
 from collections.abc import AsyncGenerator
 from collections.abc import AsyncIterator
 from collections.abc import Sequence
+from contextlib import AbstractAsyncContextManager
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import ClassVar
 from typing import Literal
 from typing import overload
 
 import psycopg
+import psycopg.abc
 import psycopg.rows
-from psycopg.types import json as pgjson
+import psycopg.sql
+import psycopg.types.json
 
 from iron_sql import runtime
 
@@ -447,8 +450,28 @@ async def {package_name}_notify(channel: str, payload: str = "") -> None:
 {"\n\n\n".join(entities)}
 
 
-class Query:
-    pass
+class Query[T]:
+    _stmt: ClassVar[psycopg.sql.SQL]
+    _row_factory: psycopg.rows.BaseRowFactory[T]
+
+    @asynccontextmanager
+    async def _client_cursor(self, params: psycopg.abc.Params | None):
+        async with (
+            {package_name}_connection() as conn,
+            psycopg.AsyncRawCursor(conn, row_factory=self._row_factory) as cur,
+        ):
+            await cur.execute(self._stmt, params)
+            yield cur
+
+    @asynccontextmanager
+    async def _server_cursor(self, params: psycopg.abc.Params | None):
+        async with (
+            {package_name}_connection() as conn,
+            runtime.ensure_transaction(conn),
+            psycopg.AsyncRawServerCursor(conn, row_factory=self._row_factory, name=runtime.next_cursor_name()) as cur,
+        ):
+            await cur.execute(self._stmt, params)
+            yield cur
 
 
 {"\n\n\n".join(query_classes)}
@@ -470,7 +493,7 @@ def {sql_fn_name}(stmt: str, row_type: str | None = None) -> Query:
     msg = f"Unknown statement: {{stmt!r}}"
     raise KeyError(msg)
 
-    """.strip()
+    """.strip()  # noqa: E501
 
 
 def render_enum_class(
@@ -536,7 +559,6 @@ def deduplicate_params(params: list[ParamSpec]) -> list[ParamSpec]:
 def render_query_class(
     query_name: str,
     stmt: str,
-    package_name: str,
     query_params: list[ParamSpec],
     result: str,
     columns_num: int,
@@ -582,39 +604,35 @@ def render_query_class(
         methods = f"""
 
 async def query_all_rows({", ".join(query_fn_params)}) -> list[{result}]:
-    async with self._execute({params_arg}) as cur:
+    async with self._client_cursor({params_arg}) as cur:
         return await cur.fetchall()
 
 async def query_single_row({", ".join(query_fn_params)}) -> {result}:
-    async with self._execute({params_arg}) as cur:
+    async with self._client_cursor({params_arg}) as cur:
         return runtime.get_one_row(await cur.fetchmany(2))
 
 async def query_optional_row({", ".join(query_fn_params)}) -> {base_result} | None:
-    async with self._execute({params_arg}) as cur:
+    async with self._client_cursor({params_arg}) as cur:
         return runtime.get_one_row_or_none(await cur.fetchmany(2))
 
-        """.strip()
+def query_stream({", ".join(query_fn_params)}) -> AbstractAsyncContextManager[AsyncIterator[{result}]]:
+    return self._server_cursor({params_arg})
+
+        """.strip()  # noqa: E501
     else:
         methods = f"""
 
 async def execute({", ".join(query_fn_params)}) -> None:
-    async with self._execute({params_arg}):
+    async with self._client_cursor({params_arg}):
         pass
 
         """.strip()
 
     return f"""
 
-class {query_name}(Query):
-    @asynccontextmanager
-    async def _execute(self, params) -> AsyncIterator[psycopg.AsyncRawCursor[{result}]]:
-        stmt = {stmt!r}
-        async with (
-            {package_name}_connection() as conn,
-            psycopg.AsyncRawCursor(conn, row_factory={row_factory}) as cur,
-        ):
-            await cur.execute(stmt, params)
-            yield cur
+class {query_name}(Query[{result}]):
+    _stmt = psycopg.sql.SQL({stmt!r})
+    _row_factory = staticmethod({row_factory})
 
     {indent_block(methods, "    ")}
 
