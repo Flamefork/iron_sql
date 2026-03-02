@@ -71,7 +71,9 @@ q2 = testdb_sql("SELECT id, username FROM users")
 """
     )
 
-    with pytest.raises(ValueError, match=r"row_type conflict \(existing='UserMini'\)"):
+    with pytest.raises(
+        ValueError, match=r"row_type conflict: .+:4 has 'UserMini', .+:5 has None"
+    ):
         test_project.generate_no_import()
 
 

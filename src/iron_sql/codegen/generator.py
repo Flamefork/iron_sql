@@ -827,11 +827,15 @@ def find_all_queries(src_path: Path, sql_fn_name: str) -> Iterator[CodeQuery]:
 
 
 def validate_stmt_has_single_row_type(queries: list[CodeQuery]) -> None:
-    row_type_by_stmt: dict[str, str | None] = {}
+    first_by_stmt: dict[str, CodeQuery] = {}
     for query in queries:
-        if query.stmt in row_type_by_stmt:
-            if query.row_type != row_type_by_stmt[query.stmt]:
-                msg = f"row_type conflict (existing={row_type_by_stmt[query.stmt]!r})"
+        if query.stmt in first_by_stmt:
+            first = first_by_stmt[query.stmt]
+            if query.row_type != first.row_type:
+                msg = (
+                    f"row_type conflict: {first.location} has {first.row_type!r},"
+                    f" {query.location} has {query.row_type!r}"
+                )
                 raise ValueError(msg)
         else:
-            row_type_by_stmt[query.stmt] = query.row_type
+            first_by_stmt[query.stmt] = query
