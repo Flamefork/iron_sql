@@ -11,16 +11,20 @@ import uuid
 from collections.abc import AsyncGenerator
 from collections.abc import AsyncIterator
 from collections.abc import Sequence
+from contextlib import AbstractAsyncContextManager
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import ClassVar
 from typing import Literal
 from typing import overload
 
 import psycopg
+import psycopg.abc
 import psycopg.rows
-from psycopg.types import json as pgjson
+import psycopg.sql
+import psycopg.types.json
 
 from iron_sql import runtime
 
@@ -110,192 +114,164 @@ class TaskStatusCount:
     task_count: int
 
 
-class Query:
-    pass
+class Query[T]:
+    _stmt: ClassVar[psycopg.sql.SQL]
+    _row_factory: psycopg.rows.BaseRowFactory[T]
 
-
-class Query_07cbb3e5226e35adbd17171f38ab7216(Query):
     @asynccontextmanager
-    async def _execute(self, params) -> AsyncIterator[psycopg.AsyncRawCursor[uuid.UUID]]:
-        stmt = 'SELECT id FROM tasks WHERE project_id = $1 AND title = $2'
+    async def _client_cursor(self, params: psycopg.abc.Params | None):
         async with (
             mydb_connection() as conn,
-            psycopg.AsyncRawCursor(conn, row_factory=runtime.typed_scalar_row(uuid.UUID, not_null=True)) as cur,
+            psycopg.AsyncRawCursor(conn, row_factory=self._row_factory) as cur,
         ):
-            await cur.execute(stmt, params)
+            await cur.execute(self._stmt, params)
             yield cur
 
+    @asynccontextmanager
+    async def _server_cursor(self, params: psycopg.abc.Params | None):
+        async with (
+            mydb_connection() as conn,
+            runtime.ensure_transaction(conn),
+            psycopg.AsyncRawServerCursor(conn, row_factory=self._row_factory, name=runtime.next_cursor_name()) as cur,
+        ):
+            await cur.execute(self._stmt, params)
+            yield cur
+
+
+class Query_07cbb3e5226e35adbd17171f38ab7216(Query[uuid.UUID]):
+    _stmt = psycopg.sql.SQL('SELECT id FROM tasks WHERE project_id = $1 AND title = $2')
+    _row_factory = staticmethod(runtime.typed_scalar_row(uuid.UUID, not_null=True))
+
     async def query_all_rows(self, *, project_id: uuid.UUID, title: str) -> list[uuid.UUID]:
-        async with self._execute((project_id, title)) as cur:
+        async with self._client_cursor((project_id, title)) as cur:
             return await cur.fetchall()
 
     async def query_single_row(self, *, project_id: uuid.UUID, title: str) -> uuid.UUID:
-        async with self._execute((project_id, title)) as cur:
+        async with self._client_cursor((project_id, title)) as cur:
             return runtime.get_one_row(await cur.fetchmany(2))
 
     async def query_optional_row(self, *, project_id: uuid.UUID, title: str) -> uuid.UUID | None:
-        async with self._execute((project_id, title)) as cur:
+        async with self._client_cursor((project_id, title)) as cur:
             return runtime.get_one_row_or_none(await cur.fetchmany(2))
 
+    def query_stream(self, *, project_id: uuid.UUID, title: str) -> AbstractAsyncContextManager[AsyncIterator[uuid.UUID]]:
+        return self._server_cursor((project_id, title))
 
-class Query_12e061f7aa94bf484295ab0018520059(Query):
-    @asynccontextmanager
-    async def _execute(self, params) -> AsyncIterator[psycopg.AsyncRawCursor[None]]:
-        stmt = 'UPDATE tasks SET status = $1 WHERE id = $2'
-        async with (
-            mydb_connection() as conn,
-            psycopg.AsyncRawCursor(conn, row_factory=psycopg.rows.scalar_row) as cur,
-        ):
-            await cur.execute(stmt, params)
-            yield cur
+
+class Query_12e061f7aa94bf484295ab0018520059(Query[None]):
+    _stmt = psycopg.sql.SQL('UPDATE tasks SET status = $1 WHERE id = $2')
+    _row_factory = staticmethod(psycopg.rows.scalar_row)
 
     async def execute(self, *, status: MydbTaskStatus, task_id: uuid.UUID) -> None:
-        async with self._execute((status, task_id)):
+        async with self._client_cursor((status, task_id)):
             pass
 
 
-class Query_3ee53b6909da8b4496346dda36c9f442(Query):
-    @asynccontextmanager
-    async def _execute(self, params) -> AsyncIterator[psycopg.AsyncRawCursor[None]]:
-        stmt = 'INSERT INTO users (id, username, email)\nVALUES ($1, $2, $3)'
-        async with (
-            mydb_connection() as conn,
-            psycopg.AsyncRawCursor(conn, row_factory=psycopg.rows.scalar_row) as cur,
-        ):
-            await cur.execute(stmt, params)
-            yield cur
+class Query_3ee53b6909da8b4496346dda36c9f442(Query[None]):
+    _stmt = psycopg.sql.SQL('INSERT INTO users (id, username, email)\nVALUES ($1, $2, $3)')
+    _row_factory = staticmethod(psycopg.rows.scalar_row)
 
     async def execute(self, *, id: uuid.UUID, username: str, email: str) -> None:
-        async with self._execute((id, username, email)):
+        async with self._client_cursor((id, username, email)):
             pass
 
 
-class Query_41cb2f3cea216a76ba87b6ddb70e6be5(Query):
-    @asynccontextmanager
-    async def _execute(self, params) -> AsyncIterator[psycopg.AsyncRawCursor[MydbUser]]:
-        stmt = 'SELECT id, username, email, created_at FROM users WHERE id = $1'
-        async with (
-            mydb_connection() as conn,
-            psycopg.AsyncRawCursor(conn, row_factory=psycopg.rows.class_row(MydbUser)) as cur,
-        ):
-            await cur.execute(stmt, params)
-            yield cur
+class Query_41cb2f3cea216a76ba87b6ddb70e6be5(Query[MydbUser]):
+    _stmt = psycopg.sql.SQL('SELECT id, username, email, created_at FROM users WHERE id = $1')
+    _row_factory = staticmethod(psycopg.rows.class_row(MydbUser))
 
     async def query_all_rows(self, *, user_id: uuid.UUID) -> list[MydbUser]:
-        async with self._execute((user_id,)) as cur:
+        async with self._client_cursor((user_id,)) as cur:
             return await cur.fetchall()
 
     async def query_single_row(self, *, user_id: uuid.UUID) -> MydbUser:
-        async with self._execute((user_id,)) as cur:
+        async with self._client_cursor((user_id,)) as cur:
             return runtime.get_one_row(await cur.fetchmany(2))
 
     async def query_optional_row(self, *, user_id: uuid.UUID) -> MydbUser | None:
-        async with self._execute((user_id,)) as cur:
+        async with self._client_cursor((user_id,)) as cur:
             return runtime.get_one_row_or_none(await cur.fetchmany(2))
 
+    def query_stream(self, *, user_id: uuid.UUID) -> AbstractAsyncContextManager[AsyncIterator[MydbUser]]:
+        return self._server_cursor((user_id,))
 
-class Query_46242a02ffe365dc17851a034fdc1d30(Query):
-    @asynccontextmanager
-    async def _execute(self, params) -> AsyncIterator[psycopg.AsyncRawCursor[MydbUser]]:
-        stmt = 'SELECT id, username, email, created_at FROM users ORDER BY created_at'
-        async with (
-            mydb_connection() as conn,
-            psycopg.AsyncRawCursor(conn, row_factory=psycopg.rows.class_row(MydbUser)) as cur,
-        ):
-            await cur.execute(stmt, params)
-            yield cur
+
+class Query_46242a02ffe365dc17851a034fdc1d30(Query[MydbUser]):
+    _stmt = psycopg.sql.SQL('SELECT id, username, email, created_at FROM users ORDER BY created_at')
+    _row_factory = staticmethod(psycopg.rows.class_row(MydbUser))
 
     async def query_all_rows(self) -> list[MydbUser]:
-        async with self._execute(None) as cur:
+        async with self._client_cursor(None) as cur:
             return await cur.fetchall()
 
     async def query_single_row(self) -> MydbUser:
-        async with self._execute(None) as cur:
+        async with self._client_cursor(None) as cur:
             return runtime.get_one_row(await cur.fetchmany(2))
 
     async def query_optional_row(self) -> MydbUser | None:
-        async with self._execute(None) as cur:
+        async with self._client_cursor(None) as cur:
             return runtime.get_one_row_or_none(await cur.fetchmany(2))
 
+    def query_stream(self) -> AbstractAsyncContextManager[AsyncIterator[MydbUser]]:
+        return self._server_cursor(None)
 
-class Query_67ac0768d48a654b1a305124c92372e8(Query):
-    @asynccontextmanager
-    async def _execute(self, params) -> AsyncIterator[psycopg.AsyncRawCursor[None]]:
-        stmt = 'INSERT INTO projects (id, name, owner_id, settings)\nVALUES ($1, $2, $3, $4)'
-        async with (
-            mydb_connection() as conn,
-            psycopg.AsyncRawCursor(conn, row_factory=psycopg.rows.scalar_row) as cur,
-        ):
-            await cur.execute(stmt, params)
-            yield cur
+
+class Query_67ac0768d48a654b1a305124c92372e8(Query[None]):
+    _stmt = psycopg.sql.SQL('INSERT INTO projects (id, name, owner_id, settings)\nVALUES ($1, $2, $3, $4)')
+    _row_factory = staticmethod(psycopg.rows.scalar_row)
 
     async def execute(self, *, id: uuid.UUID, name: str, owner_id: uuid.UUID, settings: example.models.ProjectSettings) -> None:
-        async with self._execute((id, name, owner_id, runtime.serialize_json_param(example.models.ProjectSettings, settings, 'jsonb'))):
+        async with self._client_cursor((id, name, owner_id, runtime.serialize_json_param(example.models.ProjectSettings, settings, 'jsonb'))):
             pass
 
 
-class Query_bd4c62c78a942bfd1f087f87a19f2743(Query):
-    @asynccontextmanager
-    async def _execute(self, params) -> AsyncIterator[psycopg.AsyncRawCursor[None]]:
-        stmt = 'INSERT INTO tasks (id, project_id, title, priority, assignee_id, metadata, due_date)\nVALUES ($1, $2, $3, $4, $5, $6, $7)'
-        async with (
-            mydb_connection() as conn,
-            psycopg.AsyncRawCursor(conn, row_factory=psycopg.rows.scalar_row) as cur,
-        ):
-            await cur.execute(stmt, params)
-            yield cur
+class Query_bd4c62c78a942bfd1f087f87a19f2743(Query[None]):
+    _stmt = psycopg.sql.SQL('INSERT INTO tasks (id, project_id, title, priority, assignee_id, metadata, due_date)\nVALUES ($1, $2, $3, $4, $5, $6, $7)')
+    _row_factory = staticmethod(psycopg.rows.scalar_row)
 
     async def execute(self, *, id: uuid.UUID, project_id: uuid.UUID, title: str, priority: MydbTaskPriority, assignee_id: uuid.UUID | None, metadata: example.models.TaskMetadata | None, due_date: datetime.date | None) -> None:
-        async with self._execute((id, project_id, title, priority, assignee_id, runtime.serialize_json_param(example.models.TaskMetadata, metadata, 'jsonb'), due_date)):
+        async with self._client_cursor((id, project_id, title, priority, assignee_id, runtime.serialize_json_param(example.models.TaskMetadata, metadata, 'jsonb'), due_date)):
             pass
 
 
-class Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount(Query):
-    @asynccontextmanager
-    async def _execute(self, params) -> AsyncIterator[psycopg.AsyncRawCursor[TaskStatusCount]]:
-        stmt = 'SELECT status, count(*) AS task_count\nFROM tasks WHERE project_id = $1\nGROUP BY status ORDER BY status'
-        async with (
-            mydb_connection() as conn,
-            psycopg.AsyncRawCursor(conn, row_factory=psycopg.rows.class_row(TaskStatusCount)) as cur,
-        ):
-            await cur.execute(stmt, params)
-            yield cur
+class Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount(Query[TaskStatusCount]):
+    _stmt = psycopg.sql.SQL('SELECT status, count(*) AS task_count\nFROM tasks WHERE project_id = $1\nGROUP BY status ORDER BY status')
+    _row_factory = staticmethod(psycopg.rows.class_row(TaskStatusCount))
 
     async def query_all_rows(self, *, project_id: uuid.UUID) -> list[TaskStatusCount]:
-        async with self._execute((project_id,)) as cur:
+        async with self._client_cursor((project_id,)) as cur:
             return await cur.fetchall()
 
     async def query_single_row(self, *, project_id: uuid.UUID) -> TaskStatusCount:
-        async with self._execute((project_id,)) as cur:
+        async with self._client_cursor((project_id,)) as cur:
             return runtime.get_one_row(await cur.fetchmany(2))
 
     async def query_optional_row(self, *, project_id: uuid.UUID) -> TaskStatusCount | None:
-        async with self._execute((project_id,)) as cur:
+        async with self._client_cursor((project_id,)) as cur:
             return runtime.get_one_row_or_none(await cur.fetchmany(2))
 
+    def query_stream(self, *, project_id: uuid.UUID) -> AbstractAsyncContextManager[AsyncIterator[TaskStatusCount]]:
+        return self._server_cursor((project_id,))
 
-class Query_ce9822661c2a7e0e716755087929ebd9(Query):
-    @asynccontextmanager
-    async def _execute(self, params) -> AsyncIterator[psycopg.AsyncRawCursor[MydbTask]]:
-        stmt = 'SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\nFROM tasks\nWHERE project_id = $1 AND ($2::task_status IS NULL OR status = $2)'
-        async with (
-            mydb_connection() as conn,
-            psycopg.AsyncRawCursor(conn, row_factory=psycopg.rows.class_row(MydbTask)) as cur,
-        ):
-            await cur.execute(stmt, params)
-            yield cur
+
+class Query_ce9822661c2a7e0e716755087929ebd9(Query[MydbTask]):
+    _stmt = psycopg.sql.SQL('SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\nFROM tasks\nWHERE project_id = $1 AND ($2::task_status IS NULL OR status = $2)')
+    _row_factory = staticmethod(psycopg.rows.class_row(MydbTask))
 
     async def query_all_rows(self, *, project_id: uuid.UUID, status: MydbTaskStatus | None) -> list[MydbTask]:
-        async with self._execute((project_id, status)) as cur:
+        async with self._client_cursor((project_id, status)) as cur:
             return await cur.fetchall()
 
     async def query_single_row(self, *, project_id: uuid.UUID, status: MydbTaskStatus | None) -> MydbTask:
-        async with self._execute((project_id, status)) as cur:
+        async with self._client_cursor((project_id, status)) as cur:
             return runtime.get_one_row(await cur.fetchmany(2))
 
     async def query_optional_row(self, *, project_id: uuid.UUID, status: MydbTaskStatus | None) -> MydbTask | None:
-        async with self._execute((project_id, status)) as cur:
+        async with self._client_cursor((project_id, status)) as cur:
             return runtime.get_one_row_or_none(await cur.fetchmany(2))
+
+    def query_stream(self, *, project_id: uuid.UUID, status: MydbTaskStatus | None) -> AbstractAsyncContextManager[AsyncIterator[MydbTask]]:
+        return self._server_cursor((project_id, status))
 
 
 _QUERIES: dict[str, type[Query]] = {
