@@ -7,6 +7,17 @@ from iron_sql.codegen import generate_sql_package
 from tests.conftest import ProjectBuilder
 
 
+def test_scanner_rejects_syntax_error(test_project: ProjectBuilder) -> None:
+    test_project.set_queries_source(
+        """
+        testdb_sql(
+        def broken(
+        """
+    )
+    with pytest.raises(SyntaxError, match=r"Failed to parse .+queries\.py"):
+        test_project.generate_no_import()
+
+
 def test_scanner_rejects_non_literal_sql(test_project: ProjectBuilder) -> None:
     test_project.set_queries_source(
         """

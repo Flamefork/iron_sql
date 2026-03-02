@@ -767,7 +767,12 @@ def find_fn_calls(
         content = path.read_text(encoding="utf-8")
         if fn_name not in content:
             continue
-        for node in ast.walk(ast.parse(content, filename=str(path))):
+        try:
+            tree = ast.parse(content, filename=str(path))
+        except SyntaxError as exc:
+            msg = f"Failed to parse {path}: {exc.msg} (line {exc.lineno})"
+            raise SyntaxError(msg) from exc
+        for node in ast.walk(tree):
             match node:
                 case ast.Call(func=ast.Name(id=id)) if id == fn_name:
                     yield path, node.lineno, node
