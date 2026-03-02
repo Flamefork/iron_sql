@@ -159,7 +159,7 @@ class Query_67ac0768d48a654b1a305124c92372e8(Query[None]):
 
 
 class Query_bd4c62c78a942bfd1f087f87a19f2743(Query[None]):
-    # See: example/main.py:64
+    # See: example/main.py:49, example/main.py:64
     _stmt = psycopg.sql.SQL('INSERT INTO tasks (id, project_id, title, priority, assignee_id, metadata, due_date)\nVALUES ($1, $2, $3, $4, $5, $6, $7)')
     _row_factory = staticmethod(psycopg.rows.scalar_row)
 
@@ -197,6 +197,48 @@ class Query_46242a02ffe365dc17851a034fdc1d30(Query[MydbUser]):
 
     def query_stream(self) -> AbstractAsyncContextManager[AsyncIterator[MydbUser]]:
         return self._server_cursor(None)
+
+
+class Query_41cb2f3cea216a76ba87b6ddb70e6be5(Query[MydbUser]):
+    # See: example/main.py:92, example/main.py:145
+    _stmt = psycopg.sql.SQL('SELECT id, username, email, created_at FROM users WHERE id = $1')
+    _row_factory = staticmethod(psycopg.rows.class_row(MydbUser))
+
+    async def query_all_rows(self, *, user_id: uuid.UUID) -> list[MydbUser]:
+        async with self._client_cursor((user_id,)) as cur:
+            return await cur.fetchall()
+
+    async def query_single_row(self, *, user_id: uuid.UUID) -> MydbUser:
+        async with self._client_cursor((user_id,)) as cur:
+            return runtime.get_one_row(await cur.fetchmany(2))
+
+    async def query_optional_row(self, *, user_id: uuid.UUID) -> MydbUser | None:
+        async with self._client_cursor((user_id,)) as cur:
+            return runtime.get_one_row_or_none(await cur.fetchmany(2))
+
+    def query_stream(self, *, user_id: uuid.UUID) -> AbstractAsyncContextManager[AsyncIterator[MydbUser]]:
+        return self._server_cursor((user_id,))
+
+
+class Query_ce9822661c2a7e0e716755087929ebd9(Query[MydbTask]):
+    # See: example/main.py:98, example/main.py:110, example/main.py:152
+    _stmt = psycopg.sql.SQL('SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\nFROM tasks\nWHERE project_id = $1 AND ($2::task_status IS NULL OR status = $2)')
+    _row_factory = staticmethod(psycopg.rows.class_row(MydbTask))
+
+    async def query_all_rows(self, *, project_id: uuid.UUID, status: MydbTaskStatus | None) -> list[MydbTask]:
+        async with self._client_cursor((project_id, status)) as cur:
+            return await cur.fetchall()
+
+    async def query_single_row(self, *, project_id: uuid.UUID, status: MydbTaskStatus | None) -> MydbTask:
+        async with self._client_cursor((project_id, status)) as cur:
+            return runtime.get_one_row(await cur.fetchmany(2))
+
+    async def query_optional_row(self, *, project_id: uuid.UUID, status: MydbTaskStatus | None) -> MydbTask | None:
+        async with self._client_cursor((project_id, status)) as cur:
+            return runtime.get_one_row_or_none(await cur.fetchmany(2))
+
+    def query_stream(self, *, project_id: uuid.UUID, status: MydbTaskStatus | None) -> AbstractAsyncContextManager[AsyncIterator[MydbTask]]:
+        return self._server_cursor((project_id, status))
 
 
 class Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount(Query[TaskStatusCount]):
@@ -241,58 +283,16 @@ class Query_07cbb3e5226e35adbd17171f38ab7216(Query[uuid.UUID]):
         return self._server_cursor((project_id, title))
 
 
-class Query_41cb2f3cea216a76ba87b6ddb70e6be5(Query[MydbUser]):
-    # See: example/main.py:145
-    _stmt = psycopg.sql.SQL('SELECT id, username, email, created_at FROM users WHERE id = $1')
-    _row_factory = staticmethod(psycopg.rows.class_row(MydbUser))
-
-    async def query_all_rows(self, *, user_id: uuid.UUID) -> list[MydbUser]:
-        async with self._client_cursor((user_id,)) as cur:
-            return await cur.fetchall()
-
-    async def query_single_row(self, *, user_id: uuid.UUID) -> MydbUser:
-        async with self._client_cursor((user_id,)) as cur:
-            return runtime.get_one_row(await cur.fetchmany(2))
-
-    async def query_optional_row(self, *, user_id: uuid.UUID) -> MydbUser | None:
-        async with self._client_cursor((user_id,)) as cur:
-            return runtime.get_one_row_or_none(await cur.fetchmany(2))
-
-    def query_stream(self, *, user_id: uuid.UUID) -> AbstractAsyncContextManager[AsyncIterator[MydbUser]]:
-        return self._server_cursor((user_id,))
-
-
-class Query_ce9822661c2a7e0e716755087929ebd9(Query[MydbTask]):
-    # See: example/main.py:152
-    _stmt = psycopg.sql.SQL('SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\nFROM tasks\nWHERE project_id = $1 AND ($2::task_status IS NULL OR status = $2)')
-    _row_factory = staticmethod(psycopg.rows.class_row(MydbTask))
-
-    async def query_all_rows(self, *, project_id: uuid.UUID, status: MydbTaskStatus | None) -> list[MydbTask]:
-        async with self._client_cursor((project_id, status)) as cur:
-            return await cur.fetchall()
-
-    async def query_single_row(self, *, project_id: uuid.UUID, status: MydbTaskStatus | None) -> MydbTask:
-        async with self._client_cursor((project_id, status)) as cur:
-            return runtime.get_one_row(await cur.fetchmany(2))
-
-    async def query_optional_row(self, *, project_id: uuid.UUID, status: MydbTaskStatus | None) -> MydbTask | None:
-        async with self._client_cursor((project_id, status)) as cur:
-            return runtime.get_one_row_or_none(await cur.fetchmany(2))
-
-    def query_stream(self, *, project_id: uuid.UUID, status: MydbTaskStatus | None) -> AbstractAsyncContextManager[AsyncIterator[MydbTask]]:
-        return self._server_cursor((project_id, status))
-
-
 _QUERIES: dict[str, type[Query]] = {
     '\n            INSERT INTO users (id, username, email)\n            VALUES (@id, @username, @email)\n            ': Query_3ee53b6909da8b4496346dda36c9f442,
     '\n            INSERT INTO projects (id, name, owner_id, settings)\n            VALUES (@id, @name, @owner_id, @settings)\n            ': Query_67ac0768d48a654b1a305124c92372e8,
     '\n        INSERT INTO tasks (id, project_id, title, priority, assignee_id, metadata, due_date)\n        VALUES (@id, @project_id, @title, @priority, @assignee_id?, @metadata?, @due_date?)\n        ': Query_bd4c62c78a942bfd1f087f87a19f2743,
     'UPDATE tasks SET status = @status WHERE id = @task_id': Query_12e061f7aa94bf484295ab0018520059,
     'SELECT id, username, email, created_at FROM users ORDER BY created_at': Query_46242a02ffe365dc17851a034fdc1d30,
-    '\n        SELECT status, count(*) AS task_count\n        FROM tasks WHERE project_id = @project_id\n        GROUP BY status ORDER BY status\n        ': Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount,
-    'SELECT id FROM tasks WHERE project_id = @project_id AND title = @title': Query_07cbb3e5226e35adbd17171f38ab7216,
     'SELECT id, username, email, created_at FROM users WHERE id = @user_id': Query_41cb2f3cea216a76ba87b6ddb70e6be5,
-    "\n        SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\n        FROM tasks\n        WHERE project_id = @project_id AND (sqlc.narg('status')::task_status IS NULL OR status = @status?)\n        ": Query_ce9822661c2a7e0e716755087929ebd9
+    "\n        SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\n        FROM tasks\n        WHERE project_id = @project_id AND (sqlc.narg('status')::task_status IS NULL OR status = @status?)\n        ": Query_ce9822661c2a7e0e716755087929ebd9,
+    '\n        SELECT status, count(*) AS task_count\n        FROM tasks WHERE project_id = @project_id\n        GROUP BY status ORDER BY status\n        ': Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount,
+    'SELECT id FROM tasks WHERE project_id = @project_id AND title = @title': Query_07cbb3e5226e35adbd17171f38ab7216
 }
 
 
@@ -307,13 +307,13 @@ def mydb_sql(stmt: Literal['UPDATE tasks SET status = @status WHERE id = @task_i
 @overload
 def mydb_sql(stmt: Literal['SELECT id, username, email, created_at FROM users ORDER BY created_at']) -> Query_46242a02ffe365dc17851a034fdc1d30: ...
 @overload
-def mydb_sql(stmt: Literal['\n        SELECT status, count(*) AS task_count\n        FROM tasks WHERE project_id = @project_id\n        GROUP BY status ORDER BY status\n        '], row_type: Literal['TaskStatusCount']) -> Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount: ...
-@overload
-def mydb_sql(stmt: Literal['SELECT id FROM tasks WHERE project_id = @project_id AND title = @title']) -> Query_07cbb3e5226e35adbd17171f38ab7216: ...
-@overload
 def mydb_sql(stmt: Literal['SELECT id, username, email, created_at FROM users WHERE id = @user_id']) -> Query_41cb2f3cea216a76ba87b6ddb70e6be5: ...
 @overload
 def mydb_sql(stmt: Literal["\n        SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\n        FROM tasks\n        WHERE project_id = @project_id AND (sqlc.narg('status')::task_status IS NULL OR status = @status?)\n        "]) -> Query_ce9822661c2a7e0e716755087929ebd9: ...
+@overload
+def mydb_sql(stmt: Literal['\n        SELECT status, count(*) AS task_count\n        FROM tasks WHERE project_id = @project_id\n        GROUP BY status ORDER BY status\n        '], row_type: Literal['TaskStatusCount']) -> Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount: ...
+@overload
+def mydb_sql(stmt: Literal['SELECT id FROM tasks WHERE project_id = @project_id AND title = @title']) -> Query_07cbb3e5226e35adbd17171f38ab7216: ...
 @overload
 def mydb_sql(stmt: str) -> Query: ...
 

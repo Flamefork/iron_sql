@@ -209,8 +209,15 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
 
     queries = list(find_all_queries(src_path, sql_fn_name))
     validate_stmt_has_single_row_type(queries)
+    all_locations: defaultdict[str, list[str]] = defaultdict(list)
+    first_occurrence: dict[str, CodeQuery] = {}
+    for q in queries:
+        all_locations[q.name].append(q.location)
+        if q.name not in first_occurrence:
+            first_occurrence[q.name] = q
+
     queries = sorted(
-        {q.name: q for q in queries}.values(),
+        first_occurrence.values(),
         key=lambda q: (q.file, q.lineno),
     )
 
@@ -312,7 +319,6 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
     ]
 
     query_order = {q.name: i for i, q in enumerate(queries)}
-    locations = {q.name: q.location for q in queries}
     sqlc_queries = sorted(sqlc_res.queries, key=lambda q: query_order[q.name])
 
     query_classes = [
@@ -334,7 +340,7 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
                 if len(q.columns) == 1
                 else None
             ),
-            locations[q.name],
+            all_locations[q.name],
         )
         for q in sqlc_queries
     ]
@@ -571,7 +577,7 @@ def render_query_class(
     result: str,
     columns_num: int,
     scalar_json_type: str | None,
-    location: str,
+    locations: list[str],
 ) -> str:
     query_params = deduplicate_params(query_params)
 
@@ -640,7 +646,7 @@ async def execute({", ".join(query_fn_params)}) -> None:
     return f"""
 
 class {query_name}(Query[{result}]):
-    # See: {location}
+    # See: {", ".join(locations)}
     _stmt = psycopg.sql.SQL({stmt!r})
     _row_factory = staticmethod({row_factory})
 

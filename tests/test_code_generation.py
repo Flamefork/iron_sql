@@ -1,3 +1,4 @@
+import re
 import sys
 from pathlib import Path
 
@@ -5,6 +6,30 @@ import pytest
 
 from iron_sql.codegen import generate_sql_package
 from tests.conftest import ProjectBuilder
+
+
+def test_source_location_comments(test_project: ProjectBuilder) -> None:
+    test_project.set_queries_source(
+        """\
+from typing import Any
+def testdb_sql(q: str, **kwargs: Any) -> Any: ...
+
+q1 = testdb_sql("SELECT id FROM users")
+q2 = testdb_sql("SELECT username FROM users")
+q3 = testdb_sql("SELECT id FROM users")
+"""
+    )
+    test_project.generate_no_import()
+
+    generated = (
+        test_project.src_path / f"{test_project.pkg_name.replace('.', '/')}.py"
+    ).read_text()
+
+    see_lines = [
+        [int(x) for x in re.findall(r":(\d+)", comment)]
+        for comment in re.findall(r"# See: (.+)", generated)
+    ]
+    assert see_lines == [[4, 6], [5]]
 
 
 def test_scanner_rejects_syntax_error(test_project: ProjectBuilder) -> None:
