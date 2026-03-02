@@ -209,7 +209,10 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
 
     queries = list(find_all_queries(src_path, sql_fn_name))
     validate_stmt_has_single_row_type(queries)
-    queries = list({q.name: q for q in queries}.values())
+    queries = sorted(
+        {q.name: q for q in queries}.values(),
+        key=lambda q: (q.file, q.lineno),
+    )
 
     dsn_package = importlib.import_module(dsn_import_package)
     dsn = eval(dsn_import_path, vars(dsn_package))  # noqa: S307
@@ -308,7 +311,9 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
         if (schema.name, e.name) in used_enums
     ]
 
+    query_order = {q.name: i for i, q in enumerate(queries)}
     locations = {q.name: q.location for q in queries}
+    sqlc_queries = sorted(sqlc_res.queries, key=lambda q: query_order[q.name])
 
     query_classes = [
         render_query_class(
@@ -331,7 +336,7 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
             ),
             locations[q.name],
         )
-        for q in sqlc_res.queries
+        for q in sqlc_queries
     ]
 
     query_overloads = [
@@ -347,9 +352,9 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
         sql_fn_name,
         sorted(entities),
         sorted(enums),
-        sorted(query_classes),
-        sorted(query_overloads),
-        sorted(query_dict_entries),
+        query_classes,
+        query_overloads,
+        query_dict_entries,
         application_name,
         json_import_block,
     )
