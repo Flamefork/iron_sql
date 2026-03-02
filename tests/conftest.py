@@ -15,6 +15,7 @@ from psycopg import sql
 from testcontainers.postgres import PostgresContainer
 
 from iron_sql.codegen import generate_sql_package
+from iron_sql.runtime import ConnectionPool
 
 # =============================================================================
 # PostgreSQL Container & Connection
@@ -124,6 +125,13 @@ def pg_test_dsn(pg_dsn: str, pg_template_db: str) -> Iterator[str]:
 # =============================================================================
 # Test Project Builder
 # =============================================================================
+
+
+@pytest.fixture
+async def pool(pg_dsn: str) -> AsyncIterator[ConnectionPool]:
+    p = ConnectionPool(pg_dsn, name="test_pool")
+    yield p
+    await p.close()
 
 
 class ProjectBuilder:

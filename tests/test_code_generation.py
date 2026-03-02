@@ -1,3 +1,4 @@
+import importlib.resources
 import re
 import sys
 from pathlib import Path
@@ -5,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from iron_sql.codegen import generate_sql_package
+from iron_sql.codegen.sqlc import run_sqlc
 from tests.conftest import ProjectBuilder
 
 
@@ -222,3 +224,28 @@ CONFIG = Config("{test_project.dsn}")
     )
     generated = generated_path.read_text()
     assert "CONFIG.get_dsn()" in generated
+
+
+def test_package_is_marked_as_typed() -> None:
+    assert importlib.resources.files("iron_sql").joinpath("py.typed").is_file()
+
+
+def test_run_sqlc_missing_schema() -> None:
+    with pytest.raises(ValueError, match="Schema file not found"):
+        run_sqlc(
+            schema_path=Path("nonexistent.sql"),
+            queries=[],
+            dsn="postgres://",
+        )
+
+
+def test_run_sqlc_no_queries(tmp_path: Path) -> None:
+    schema_path = tmp_path / "schema.sql"
+    schema_path.touch()
+    result = run_sqlc(
+        schema_path=schema_path,
+        queries=[],
+        dsn="postgres://",
+    )
+    assert result.queries == ()
+    assert result.catalog.schemas == ()
