@@ -16,12 +16,10 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import ClassVar
 from typing import Literal
 from typing import overload
 
 import psycopg
-import psycopg.abc
 import psycopg.rows
 import psycopg.sql
 import psycopg.types.json
@@ -46,9 +44,7 @@ _mydb_connection = ContextVar[psycopg.AsyncConnection | None](
 
 @asynccontextmanager
 async def mydb_connection() -> AsyncIterator[psycopg.AsyncConnection]:
-    async with MYDB_POOL.connection_in_context(
-        _mydb_connection
-    ) as conn:
+    async with MYDB_POOL.connection_in_context(_mydb_connection) as conn:
         yield conn
 
 
@@ -114,32 +110,12 @@ class TaskStatusCount:
     task_count: int
 
 
-class Query[T]:
-    _stmt: ClassVar[psycopg.sql.SQL]
-    _row_factory: psycopg.rows.BaseRowFactory[T]
-
-    @asynccontextmanager
-    async def _client_cursor(self, params: psycopg.abc.Params | None):
-        async with (
-            mydb_connection() as conn,
-            psycopg.AsyncRawCursor(conn, row_factory=self._row_factory) as cur,
-        ):
-            await cur.execute(self._stmt, params)
-            yield cur
-
-    @asynccontextmanager
-    async def _server_cursor(self, params: psycopg.abc.Params | None):
-        async with (
-            mydb_connection() as conn,
-            runtime.ensure_transaction(conn),
-            psycopg.AsyncRawServerCursor(conn, row_factory=self._row_factory, name=runtime.next_cursor_name()) as cur,
-        ):
-            await cur.execute(self._stmt, params)
-            yield cur
+class Query[T](runtime.Query[T]):
+    _connection_factory = staticmethod(mydb_connection)
 
 
 class Query_3ee53b6909da8b4496346dda36c9f442(Query[None]):
-    # See: example/main.py:22
+    # See: example/main.py:23
     _stmt = psycopg.sql.SQL('INSERT INTO users (id, username, email)\nVALUES ($1, $2, $3)')
     _row_factory = staticmethod(psycopg.rows.scalar_row)
 
@@ -149,7 +125,7 @@ class Query_3ee53b6909da8b4496346dda36c9f442(Query[None]):
 
 
 class Query_67ac0768d48a654b1a305124c92372e8(Query[None]):
-    # See: example/main.py:32
+    # See: example/main.py:33
     _stmt = psycopg.sql.SQL('INSERT INTO projects (id, name, owner_id, settings)\nVALUES ($1, $2, $3, $4)')
     _row_factory = staticmethod(psycopg.rows.scalar_row)
 
@@ -159,7 +135,7 @@ class Query_67ac0768d48a654b1a305124c92372e8(Query[None]):
 
 
 class Query_bd4c62c78a942bfd1f087f87a19f2743(Query[None]):
-    # See: example/main.py:49, example/main.py:64
+    # See: example/main.py:50, example/main.py:65
     _stmt = psycopg.sql.SQL('INSERT INTO tasks (id, project_id, title, priority, assignee_id, metadata, due_date)\nVALUES ($1, $2, $3, $4, $5, $6, $7)')
     _row_factory = staticmethod(psycopg.rows.scalar_row)
 
@@ -169,7 +145,7 @@ class Query_bd4c62c78a942bfd1f087f87a19f2743(Query[None]):
 
 
 class Query_12e061f7aa94bf484295ab0018520059(Query[None]):
-    # See: example/main.py:80
+    # See: example/main.py:81, example/main.py:168
     _stmt = psycopg.sql.SQL('UPDATE tasks SET status = $1 WHERE id = $2')
     _row_factory = staticmethod(psycopg.rows.scalar_row)
 
@@ -179,7 +155,7 @@ class Query_12e061f7aa94bf484295ab0018520059(Query[None]):
 
 
 class Query_46242a02ffe365dc17851a034fdc1d30(Query[MydbUser]):
-    # See: example/main.py:86
+    # See: example/main.py:87
     _stmt = psycopg.sql.SQL('SELECT id, username, email, created_at FROM users ORDER BY created_at')
     _row_factory = staticmethod(psycopg.rows.class_row(MydbUser))
 
@@ -200,7 +176,7 @@ class Query_46242a02ffe365dc17851a034fdc1d30(Query[MydbUser]):
 
 
 class Query_41cb2f3cea216a76ba87b6ddb70e6be5(Query[MydbUser]):
-    # See: example/main.py:92, example/main.py:145
+    # See: example/main.py:93, example/main.py:146
     _stmt = psycopg.sql.SQL('SELECT id, username, email, created_at FROM users WHERE id = $1')
     _row_factory = staticmethod(psycopg.rows.class_row(MydbUser))
 
@@ -221,7 +197,7 @@ class Query_41cb2f3cea216a76ba87b6ddb70e6be5(Query[MydbUser]):
 
 
 class Query_ce9822661c2a7e0e716755087929ebd9(Query[MydbTask]):
-    # See: example/main.py:98, example/main.py:110, example/main.py:152
+    # See: example/main.py:99, example/main.py:111, example/main.py:153
     _stmt = psycopg.sql.SQL('SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\nFROM tasks\nWHERE project_id = $1 AND ($2::task_status IS NULL OR status = $2)')
     _row_factory = staticmethod(psycopg.rows.class_row(MydbTask))
 
@@ -242,7 +218,7 @@ class Query_ce9822661c2a7e0e716755087929ebd9(Query[MydbTask]):
 
 
 class Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount(Query[TaskStatusCount]):
-    # See: example/main.py:123
+    # See: example/main.py:124
     _stmt = psycopg.sql.SQL('SELECT status, count(*) AS task_count\nFROM tasks WHERE project_id = $1\nGROUP BY status ORDER BY status')
     _row_factory = staticmethod(psycopg.rows.class_row(TaskStatusCount))
 
@@ -263,7 +239,7 @@ class Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount(Query[TaskStatusCou
 
 
 class Query_07cbb3e5226e35adbd17171f38ab7216(Query[uuid.UUID]):
-    # See: example/main.py:135
+    # See: example/main.py:136
     _stmt = psycopg.sql.SQL('SELECT id FROM tasks WHERE project_id = $1 AND title = $2')
     _row_factory = staticmethod(runtime.typed_scalar_row(uuid.UUID, not_null=True))
 
@@ -283,6 +259,27 @@ class Query_07cbb3e5226e35adbd17171f38ab7216(Query[uuid.UUID]):
         return self._server_cursor((project_id, title))
 
 
+class Query_29c838280e39383dd6b0760431eb3e60(Query[int]):
+    # See: example/main.py:174
+    _stmt = psycopg.sql.SQL('SELECT count(*) FROM tasks WHERE status = $1')
+    _row_factory = staticmethod(runtime.typed_scalar_row(int, not_null=True))
+
+    async def query_all_rows(self, *, status: MydbTaskStatus) -> list[int]:
+        async with self._client_cursor((status,)) as cur:
+            return await cur.fetchall()
+
+    async def query_single_row(self, *, status: MydbTaskStatus) -> int:
+        async with self._client_cursor((status,)) as cur:
+            return runtime.get_one_row(await cur.fetchmany(2))
+
+    async def query_optional_row(self, *, status: MydbTaskStatus) -> int | None:
+        async with self._client_cursor((status,)) as cur:
+            return runtime.get_one_row_or_none(await cur.fetchmany(2))
+
+    def query_stream(self, *, status: MydbTaskStatus) -> AbstractAsyncContextManager[AsyncIterator[int]]:
+        return self._server_cursor((status,))
+
+
 _QUERIES: dict[str, type[Query]] = {
     '\n            INSERT INTO users (id, username, email)\n            VALUES (@id, @username, @email)\n            ': Query_3ee53b6909da8b4496346dda36c9f442,
     '\n            INSERT INTO projects (id, name, owner_id, settings)\n            VALUES (@id, @name, @owner_id, @settings)\n            ': Query_67ac0768d48a654b1a305124c92372e8,
@@ -292,7 +289,8 @@ _QUERIES: dict[str, type[Query]] = {
     'SELECT id, username, email, created_at FROM users WHERE id = @user_id': Query_41cb2f3cea216a76ba87b6ddb70e6be5,
     "\n        SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\n        FROM tasks\n        WHERE project_id = @project_id AND (sqlc.narg('status')::task_status IS NULL OR status = @status?)\n        ": Query_ce9822661c2a7e0e716755087929ebd9,
     '\n        SELECT status, count(*) AS task_count\n        FROM tasks WHERE project_id = @project_id\n        GROUP BY status ORDER BY status\n        ': Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount,
-    'SELECT id FROM tasks WHERE project_id = @project_id AND title = @title': Query_07cbb3e5226e35adbd17171f38ab7216
+    'SELECT id FROM tasks WHERE project_id = @project_id AND title = @title': Query_07cbb3e5226e35adbd17171f38ab7216,
+    'SELECT count(*) FROM tasks WHERE status = @status': Query_29c838280e39383dd6b0760431eb3e60
 }
 
 
@@ -314,6 +312,8 @@ def mydb_sql(stmt: Literal["\n        SELECT id, project_id, assignee_id, title,
 def mydb_sql(stmt: Literal['\n        SELECT status, count(*) AS task_count\n        FROM tasks WHERE project_id = @project_id\n        GROUP BY status ORDER BY status\n        '], row_type: Literal['TaskStatusCount']) -> Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount: ...
 @overload
 def mydb_sql(stmt: Literal['SELECT id FROM tasks WHERE project_id = @project_id AND title = @title']) -> Query_07cbb3e5226e35adbd17171f38ab7216: ...
+@overload
+def mydb_sql(stmt: Literal['SELECT count(*) FROM tasks WHERE status = @status']) -> Query_29c838280e39383dd6b0760431eb3e60: ...
 @overload
 def mydb_sql(stmt: str) -> Query: ...
 

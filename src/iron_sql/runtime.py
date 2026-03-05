@@ -9,11 +9,13 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from enum import Enum
 from typing import Any
+from typing import ClassVar
 from typing import Literal
 from typing import Self
 from typing import overload
 
 import psycopg
+import psycopg.abc
 import psycopg.rows
 import psycopg.sql
 import psycopg.types.json
@@ -104,12 +106,12 @@ def _validate_channel(name: str) -> None:
 _cursor_seq = itertools.count()
 
 
-def next_cursor_name() -> str:
+def _next_cursor_name() -> str:
     return f"_c{next(_cursor_seq)}"
 
 
 @asynccontextmanager
-async def ensure_transaction(conn: psycopg.AsyncConnection) -> AsyncIterator[None]:
+async def _ensure_transaction(conn: psycopg.AsyncConnection) -> AsyncIterator[None]:
     match conn.info.transaction_status:
         case psycopg.pq.TransactionStatus.IDLE:
             async with conn.transaction():
@@ -119,6 +121,44 @@ async def ensure_transaction(conn: psycopg.AsyncConnection) -> AsyncIterator[Non
         case status:
             msg = f"Cannot use server-side cursor: connection is in {status.name} state"
             raise psycopg.InterfaceError(msg)
+
+
+class Query[T]:
+    _stmt: ClassVar[psycopg.sql.SQL]
+    _row_factory: psycopg.rows.BaseRowFactory[T]
+    _connection_factory: Callable[
+        [], contextlib.AbstractAsyncContextManager[psycopg.AsyncConnection]
+    ]
+
+    def with_connection(self, connection: psycopg.AsyncConnection) -> Self:
+        q = self.__class__()
+        q._connection_factory = lambda: contextlib.nullcontext(connection)  # noqa: SLF001
+        return q
+
+    @asynccontextmanager
+    async def _client_cursor(
+        self, params: psycopg.abc.Params | None
+    ) -> AsyncIterator[psycopg.AsyncRawCursor[T]]:
+        async with (
+            self._connection_factory() as conn,
+            psycopg.AsyncRawCursor(conn, row_factory=self._row_factory) as cur,
+        ):
+            await cur.execute(self._stmt, params)
+            yield cur
+
+    @asynccontextmanager
+    async def _server_cursor(
+        self, params: psycopg.abc.Params | None
+    ) -> AsyncIterator[psycopg.AsyncRawServerCursor[T]]:
+        async with (
+            self._connection_factory() as conn,
+            _ensure_transaction(conn),
+            psycopg.AsyncRawServerCursor(
+                conn, row_factory=self._row_factory, name=_next_cursor_name()
+            ) as cur,
+        ):
+            await cur.execute(self._stmt, params)
+            yield cur
 
 
 class ConnectionPool:

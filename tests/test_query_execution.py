@@ -181,8 +181,37 @@ async def test_ensure_transaction_error_state(test_project: ProjectBuilder) -> N
         assert conn.info.transaction_status == psycopg.pq.TransactionStatus.INERROR
 
         with pytest.raises(psycopg.InterfaceError, match="INERROR"):
-            async with runtime.ensure_transaction(conn):
+            async with runtime._ensure_transaction(conn):  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
                 pass
+
+
+async def test_with_connection(test_project: ProjectBuilder) -> None:
+    insert_sql = "INSERT INTO users (id, username) VALUES ($1, $2)"
+    select_sql = "SELECT username FROM users WHERE id = $1"
+
+    test_project.add_query("ins", insert_sql)
+    test_project.add_query("sel", select_sql)
+
+    mod = test_project.generate()
+    uid = uuid.uuid4()
+
+    async with mod.TESTDB_POOL.connection() as conn:
+        async with conn.transaction():
+            await (
+                mod
+                .testdb_sql(insert_sql)
+                .with_connection(conn)
+                .execute(uid, "explicit")
+            )
+
+        row = (
+            await mod.testdb_sql(select_sql).with_connection(conn).query_single_row(uid)
+        )
+        assert row == "explicit"
+
+    # Original query object is not affected
+    row2 = await mod.testdb_sql(select_sql).query_single_row(uid)
+    assert row2 == "explicit"
 
 
 async def test_transaction_rollback(test_project: ProjectBuilder) -> None:

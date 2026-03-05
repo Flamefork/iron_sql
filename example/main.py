@@ -2,6 +2,7 @@ import asyncio
 import uuid
 from datetime import date
 
+from example.db.mydb import MYDB_POOL
 from example.db.mydb import MydbTaskPriority
 from example.db.mydb import MydbTaskStatus
 from example.db.mydb import mydb_listen_session
@@ -161,6 +162,20 @@ async def main() -> None:
     ) as tasks:
         async for task in tasks:
             print(f"Streamed task: {task.title} ({task.status})")
+
+    # --- Explicit connection: run a query outside the current context ---
+    async with mydb_transaction():
+        await mydb_sql("UPDATE tasks SET status = @status WHERE id = @task_id").execute(
+            task_id=task1_id, status=MydbTaskStatus.IN_PROGRESS
+        )
+
+        async with MYDB_POOL.connection() as conn:
+            audit_count = await (
+                mydb_sql("SELECT count(*) FROM tasks WHERE status = @status")
+                .with_connection(conn)
+                .query_single_row(status=MydbTaskStatus.IN_PROGRESS)
+            )
+            print(f"Audit (separate conn): {audit_count} in-progress tasks")
 
     # --- LISTEN/NOTIFY ---
     async with mydb_listen_session("task_updates") as task_ids:

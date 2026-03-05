@@ -446,12 +446,10 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import ClassVar
 from typing import Literal
 from typing import overload
 
 import psycopg
-import psycopg.abc
 import psycopg.rows
 import psycopg.sql
 import psycopg.types.json
@@ -475,9 +473,7 @@ _{package_name}_connection = ContextVar[psycopg.AsyncConnection | None](
 
 @asynccontextmanager
 async def {package_name}_connection() -> AsyncIterator[psycopg.AsyncConnection]:
-    async with {package_name.upper()}_POOL.connection_in_context(
-        _{package_name}_connection
-    ) as conn:
+    async with {package_name.upper()}_POOL.connection_in_context(_{package_name}_connection) as conn:
         yield conn
 
 
@@ -507,28 +503,8 @@ async def {package_name}_notify(channel: str, payload: str = "") -> None:
 {"\n\n\n".join(entities)}
 
 
-class Query[T]:
-    _stmt: ClassVar[psycopg.sql.SQL]
-    _row_factory: psycopg.rows.BaseRowFactory[T]
-
-    @asynccontextmanager
-    async def _client_cursor(self, params: psycopg.abc.Params | None):
-        async with (
-            {package_name}_connection() as conn,
-            psycopg.AsyncRawCursor(conn, row_factory=self._row_factory) as cur,
-        ):
-            await cur.execute(self._stmt, params)
-            yield cur
-
-    @asynccontextmanager
-    async def _server_cursor(self, params: psycopg.abc.Params | None):
-        async with (
-            {package_name}_connection() as conn,
-            runtime.ensure_transaction(conn),
-            psycopg.AsyncRawServerCursor(conn, row_factory=self._row_factory, name=runtime.next_cursor_name()) as cur,
-        ):
-            await cur.execute(self._stmt, params)
-            yield cur
+class Query[T](runtime.Query[T]):
+    _connection_factory = staticmethod({package_name}_connection)
 
 
 {"\n\n\n".join(query_classes)}
