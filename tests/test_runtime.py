@@ -1,4 +1,7 @@
+import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -65,6 +68,40 @@ async def test_pool_check_and_await(pool: ConnectionPool) -> None:
 async def test_pool_context_manager(pg_dsn: str) -> None:
     async with ConnectionPool(pg_dsn) as p:
         await p.check()
+
+
+# Workaround for https://github.com/psycopg/psycopg/issues/1275
+async def test_pool_connection_reraises_cancelled_error_swallowed_by_pool(
+    pool: ConnectionPool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = False
+    exited = False
+
+    @asynccontextmanager
+    async def fake_connection():  # noqa: RUF029
+        nonlocal entered, exited
+        entered = True
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel()
+        try:
+            yield object()
+        finally:
+            exited = True
+
+    monkeypatch.setattr(pool.psycopg_pool, "open", AsyncMock())
+    monkeypatch.setattr(pool.psycopg_pool, "connection", fake_connection)
+
+    async def probe() -> None:
+        async with pool.connection() as conn:
+            _ = conn
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.create_task(probe())
+
+    assert entered
+    assert exited
 
 
 def test_get_one_row_or_none_too_many() -> None:

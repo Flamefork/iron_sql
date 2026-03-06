@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import itertools
 import types
@@ -198,8 +199,13 @@ class ConnectionPool:
 
     @asynccontextmanager
     async def connection(self) -> AsyncIterator[psycopg.AsyncConnection]:
+        task = asyncio.current_task()
+        cancelling_before = 0 if task is None else task.cancelling()
         await self.psycopg_pool.open()
         async with self.psycopg_pool.connection() as conn:
+            # Workaround for https://github.com/psycopg/psycopg/issues/1275
+            if task is not None and task.cancelling() > cancelling_before:
+                raise asyncio.CancelledError
             yield conn
 
     def _init_psycopg_pool(self) -> None:
