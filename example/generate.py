@@ -20,6 +20,7 @@ def generate_db_package(dsn: str, schema_path: Path, src_path: Path) -> bool:
         schema_path=schema_path,
         package_full_name="example.db.mydb",
         dsn_import="example.config:DSN",
+        pool_options_import="example.config:POOL_OPTIONS",
         src_path=src_path,
         json_model_overrides={
             "projects.settings": "example.models:ProjectSettings",

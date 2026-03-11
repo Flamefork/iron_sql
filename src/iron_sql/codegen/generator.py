@@ -71,6 +71,50 @@ class UnknownSQLTypeWarning(UserWarning):
     pass
 
 
+@dataclass(kw_only=True, frozen=True)
+class ModuleExprRef:
+    module_name: str
+    module_expr: str
+
+    @classmethod
+    def parse(cls, value: str) -> "ModuleExprRef":
+        module_name, sep, module_expr = value.partition(":")
+        if not sep:
+            msg = f"module expression must be 'module:expr', got: {value!r}"
+            raise ValueError(msg)
+        match = re.match(r"[A-Za-z_][A-Za-z0-9_]*", module_expr)
+        if match is None:
+            msg = (
+                "module expression must start with identifier, "
+                f"got: {module_expr!r}"
+            )
+            raise ValueError(msg)
+        return cls(module_name=module_name, module_expr=module_expr)
+
+    @property
+    def import_name(self) -> str:
+        match = re.match(r"[A-Za-z_][A-Za-z0-9_]*", self.module_expr)
+        if match is None:
+            msg = (
+                "module expression must start with identifier, "
+                f"got: {self.module_expr!r}"
+            )
+            raise ValueError(msg)
+        return match.group()
+
+    def evaluate[T](self, *, expected_type: type[T]) -> T:
+        mod = importlib.import_module(self.module_name)
+        value = eval(self.module_expr, vars(mod))  # noqa: S307
+        if not isinstance(value, expected_type):
+            msg = (
+                f"module expression {self.module_name}:{self.module_expr} "
+                f"must evaluate to "
+                f"{expected_type.__name__}, got: {type(value).__name__}"
+            )
+            raise TypeError(msg)
+        return value
+
+
 _SQL_TYPE_MAP: dict[str, str] = {
     "bool": "bool",
     "boolean": "bool",
@@ -210,6 +254,7 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
     schema_path: Path,
     package_full_name: str,
     dsn_import: str,
+    pool_options_import: str | None = None,
     application_name: str | None = None,
     type_overrides: dict[str, str] | None = None,
     json_model_overrides: dict[str, str] | None = None,
@@ -224,7 +269,15 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
 
     queries, all_locations = collect_queries(src_path, sql_fn_name)
 
-    dsn, dsn_import_package, dsn_import_path = resolve_dsn(dsn_import)
+    dsn_ref = ModuleExprRef.parse(dsn_import)
+    dsn = dsn_ref.evaluate(expected_type=str)
+    pool_options_ref = (
+        ModuleExprRef.parse(pool_options_import)
+        if pool_options_import is not None
+        else None
+    )
+    if pool_options_ref is not None:
+        pool_options_ref.evaluate(expected_type=dict)
 
     sqlc_res, block_starts = run_sqlc(
         src_path / schema_path,
@@ -283,8 +336,7 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
     target_package_path = src_path / f"{package_full_name.replace('.', '/')}.py"
 
     new_content = render_package(
-        dsn_import_package,
-        dsn_import_path,
+        dsn_ref,
         package_name,
         sql_fn_name,
         entities,
@@ -294,6 +346,7 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
         query_dict_entries,
         application_name,
         json_import_block,
+        pool_options_ref,
     )
     changed = write_if_changed(target_package_path, new_content + "\n")
     if changed:
@@ -314,13 +367,6 @@ def collect_queries(
             first_occurrence[q.name] = q
     queries = sorted(first_occurrence.values(), key=lambda q: (q.file, q.lineno))
     return queries, all_locations
-
-
-def resolve_dsn(dsn_import: str) -> tuple[str, str, str]:
-    package_name, attr_path = dsn_import.split(":")
-    mod = importlib.import_module(package_name)
-    dsn: str = eval(attr_path, vars(mod))  # noqa: S307
-    return dsn, package_name, attr_path
 
 
 def render_query_classes(
@@ -414,8 +460,7 @@ def resolve_json_model_overrides(
 
 
 def render_package(  # noqa: PLR0913, PLR0917
-    dsn_import_package: str,
-    dsn_import_path: str,
+    dsn_ref: ModuleExprRef,
     package_name: str,
     sql_fn_name: str,
     entities: list[str],
@@ -425,7 +470,27 @@ def render_package(  # noqa: PLR0913, PLR0917
     query_dict_entries: list[str],
     application_name: str | None = None,
     json_import_block: str = "",
-):
+    pool_options_ref: ModuleExprRef | None = None,
+) -> str:
+    imports = [f"from {dsn_ref.module_name} import {dsn_ref.import_name}"]
+    pool_args = [
+        dsn_ref.module_expr,
+        f'name="{package_name}"',
+        f"application_name={application_name!r}",
+    ]
+    if pool_options_ref is not None:
+        imports.append(
+            f"from {pool_options_ref.module_name} import {pool_options_ref.import_name}"
+        )
+        pool_args.append(f"pool_options={pool_options_ref.module_expr}")
+
+    if json_import_block:
+        imports.extend(json_import_block.strip().splitlines())
+
+    imports_block = "\n".join(imports)
+
+    pool_args_str = ",\n    ".join(pool_args)
+
     return f"""
 
 # Code generated by iron_sql, DO NOT EDIT.
@@ -456,13 +521,11 @@ import psycopg.types.json
 
 from iron_sql import runtime
 
-from {dsn_import_package} import {dsn_import_path.split(".", maxsplit=1)[0]}
-{json_import_block}
+{imports_block}
+
 
 {package_name.upper()}_POOL = runtime.ConnectionPool(
-    {dsn_import_path},
-    name="{package_name}",
-    application_name={application_name!r},
+    {pool_args_str},
 )
 
 _{package_name}_connection = ContextVar[psycopg.AsyncConnection | None](

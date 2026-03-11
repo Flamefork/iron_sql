@@ -27,13 +27,15 @@ import psycopg.types.json
 from iron_sql import runtime
 
 from example.config import DSN
-
+from example.config import POOL_OPTIONS
 import example.models
+
 
 MYDB_POOL = runtime.ConnectionPool(
     DSN,
     name="mydb",
     application_name=None,
+    pool_options=POOL_OPTIONS,
 )
 
 _mydb_connection = ContextVar[psycopg.AsyncConnection | None](
