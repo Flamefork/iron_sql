@@ -14,7 +14,7 @@ import pytest
 from psycopg import sql
 from testcontainers.postgres import PostgresContainer
 
-from iron_sql.codegen import generate_sql_package
+from iron_sql.codegen import generate_sql_module
 from iron_sql.runtime import ConnectionPool
 
 # =============================================================================
@@ -146,7 +146,7 @@ class ProjectBuilder:
         self.dsn = dsn
         self.test_name = test_name
         self.schema_path = schema_path
-        self.pkg_name = f"testapp_{test_name}.testdb"
+        self.module_full_name = f"testapp_{test_name}.testdb"
         self.src_path = root / "src"
         self.app_pkg = f"testapp_{test_name}"
         self.app_dir = self.src_path / self.app_pkg
@@ -212,10 +212,10 @@ class ProjectBuilder:
         if str(self.src_path) not in sys.path:
             sys.path.insert(0, str(self.src_path))
 
-        return generate_sql_package(
+        return generate_sql_module(
             schema_path=Path("schema.sql"),
-            package_full_name=self.pkg_name,
-            dsn_import=f"{self.app_pkg}.config:DSN",
+            module_full_name=self.module_full_name,
+            dsn_expr=f"{self.app_pkg}.config:DSN",
             src_path=self.src_path,
             tempdir_path=self.src_path,
             type_overrides=type_overrides,
@@ -234,9 +234,9 @@ class ProjectBuilder:
         )
 
         importlib.invalidate_caches()
-        sys.modules.pop(self.pkg_name, None)
+        sys.modules.pop(self.module_full_name, None)
 
-        mod = importlib.import_module(self.pkg_name)
+        mod = importlib.import_module(self.module_full_name)
         self.generated_modules.append(mod)
         return mod
 

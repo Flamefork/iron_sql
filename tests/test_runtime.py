@@ -121,6 +121,23 @@ async def test_typed_scalar_row_not_null_raises_on_none(
             await cur.fetchone()
 
 
+async def test_pool_forwards_pool_options(pg_dsn: str) -> None:
+    async with ConnectionPool(pg_dsn, pool_options={"min_size": 1, "max_size": 2}) as p:
+        assert p.psycopg_pool.min_size == 1
+        assert p.psycopg_pool.max_size == 2
+        await p.check()
+
+
+async def test_pool_preserves_application_name_from_pool_options_kwargs() -> None:
+    pool = ConnectionPool(
+        "postgresql://example.invalid/db",
+        pool_options={"kwargs": {"application_name": "from-pool-options"}},
+    )
+    assert isinstance(pool.psycopg_pool.kwargs, dict)
+    assert pool.psycopg_pool.kwargs["application_name"] == "from-pool-options"
+    await pool.psycopg_pool.close()
+
+
 async def test_typed_scalar_row_type_mismatch(pool: ConnectionPool) -> None:
     async with (
         pool.connection() as conn,

@@ -289,7 +289,7 @@ class Payload(BaseModel):
     )
 
     generated_path = (
-        test_project.src_path / f"{test_project.pkg_name.replace('.', '/')}.py"
+        test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
     )
     generated = generated_path.read_text(encoding="utf-8")
 

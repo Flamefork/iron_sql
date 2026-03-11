@@ -5,7 +5,7 @@
 [![PyPI - Version](https://img.shields.io/pypi/v/iron-sql)](https://pypi.org/project/iron-sql/)
 
 
-`iron_sql` is a typed SQL code generator and async runtime for PostgreSQL. Write SQL where you use it, run `generate_sql_package`, and get a module with typed dataclasses, query helpers, and pooled connections without hand-written boilerplate.
+`iron_sql` is a typed SQL code generator and async runtime for PostgreSQL. Write SQL where you use it, run `generate_sql_module`, and get a module with typed dataclasses, query helpers, and pooled connections without hand-written boilerplate.
 
 ## Installation
 
@@ -17,7 +17,7 @@ pip install iron-sql[codegen]    # + inflection for code generation
 The `sqlc` binary is bundled automatically via the `sqlc` Python package.
 
 ## Key Features
-- **Query discovery.** `generate_sql_package` scans your codebase for calls like `<package>_sql("SELECT ...")`, runs `sqlc` for type analysis, and emits a typed module.
+- **Query discovery.** `generate_sql_module` scans your codebase for calls like `<module>_sql("SELECT ...")`, runs `sqlc` for type analysis, and emits a typed module.
 - **Strong typing.** Generated dataclasses and method signatures flow through your IDE and type checker.
 - **Async runtime.** Built on `psycopg` v3 with pooled connections, context-based connection reuse, and transaction helpers.
 - **Streaming.** `query_stream()` uses server-side cursors for memory-efficient iteration over large result sets.
@@ -44,12 +44,12 @@ The `sqlc` binary is bundled automatically via the `sqlc` Python package.
    ```python
    from pathlib import Path
 
-   from iron_sql.codegen import generate_sql_package
+   from iron_sql.codegen import generate_sql_module
 
-   generate_sql_package(
+   generate_sql_module(
        schema_path=Path("schema.sql"),
-       package_full_name="myapp.db.mydb",
-       dsn_import="myapp.config:DSN",
+       module_full_name="myapp.db.mydb",
+       dsn_expr="myapp.config:DSN",
        src_path=Path("."),
    )
    ```
@@ -66,7 +66,7 @@ The `sqlc` binary is bundled automatically via the `sqlc` Python package.
 - **Type overrides.** `type_overrides={"custom_type": "int"}` maps database type names to Python type strings.
 - **JSON model overrides.** `json_model_overrides={"users.metadata": "myapp.models:UserMeta"}` adds Pydantic validation for JSON/JSONB columns.
 - **Naming conventions.** Supply `to_pascal_fn` and `to_snake_fn` callables to control generated names.
-- **DSN configuration.** `dsn_import` is written verbatim into the generated module; point it at a config variable, env var lookup, or function call.
+- **Connection settings.** `dsn_expr` and `pool_options_expr` are written verbatim into the generated module; point them at config variables, env var lookups, or function calls.
 - **Debug artifacts.** Pass `debug_path` to save sqlc inputs and outputs for inspection.
 
 ## Runtime Highlights

@@ -4,6 +4,7 @@ import itertools
 import types
 from collections.abc import AsyncGenerator
 from collections.abc import AsyncIterator
+from collections.abc import Awaitable
 from collections.abc import Callable
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
@@ -13,6 +14,7 @@ from typing import Any
 from typing import ClassVar
 from typing import Literal
 from typing import Self
+from typing import TypedDict
 from typing import overload
 
 import psycopg
@@ -162,6 +164,22 @@ class Query[T]:
             yield cur
 
 
+class PoolOptions(TypedDict, total=False):
+    min_size: int
+    max_size: int | None
+    timeout: float
+    max_waiting: int
+    max_lifetime: float
+    max_idle: float
+    reconnect_timeout: float
+    num_workers: int
+    kwargs: dict[str, Any]
+    configure: Callable[[psycopg.AsyncConnection[Any]], Awaitable[None]]
+    check: Callable[[psycopg.AsyncConnection[Any]], Awaitable[None]]
+    reset: Callable[[psycopg.AsyncConnection[Any]], Awaitable[None]]
+    reconnect_failed: Callable[[psycopg_pool.AsyncConnectionPool[Any]], Awaitable[None]]
+
+
 class ConnectionPool:
     def __init__(
         self,
@@ -169,10 +187,12 @@ class ConnectionPool:
         *,
         name: str | None = None,
         application_name: str | None = None,
+        pool_options: PoolOptions | None = None,
     ) -> None:
         self.conninfo = conninfo
         self.name = name
         self.application_name = application_name
+        self.pool_options = pool_options or {}
         self._init_psycopg_pool()
 
     async def close(self) -> None:
@@ -209,15 +229,23 @@ class ConnectionPool:
             yield conn
 
     def _init_psycopg_pool(self) -> None:
+        user_kwargs: dict[str, Any] = self.pool_options.get("kwargs", {})
+        forwarded: dict[str, Any] = {
+            k: v for k, v in self.pool_options.items() if k != "kwargs"
+        }
+        conn_kwargs = {
+            **user_kwargs,
+            # https://www.psycopg.org/psycopg3/docs/basic/transactions.html#autocommit-transactions
+            "autocommit": True,
+        }
+        if self.application_name is not None:
+            conn_kwargs["application_name"] = self.application_name
         self.psycopg_pool = psycopg_pool.AsyncConnectionPool(
             self.conninfo,
+            **forwarded,
             open=False,
             name=self.name,
-            kwargs={
-                "application_name": self.application_name,
-                # https://www.psycopg.org/psycopg3/docs/basic/transactions.html#autocommit-transactions
-                "autocommit": True,
-            },
+            kwargs=conn_kwargs,
         )
 
     @asynccontextmanager
