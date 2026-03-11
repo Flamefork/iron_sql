@@ -84,10 +84,7 @@ class ModuleExprRef:
             raise ValueError(msg)
         match = re.match(r"[A-Za-z_][A-Za-z0-9_]*", module_expr)
         if match is None:
-            msg = (
-                "module expression must start with identifier, "
-                f"got: {module_expr!r}"
-            )
+            msg = f"module expression must start with identifier, got: {module_expr!r}"
             raise ValueError(msg)
         return cls(module_name=module_name, module_expr=module_expr)
 
@@ -155,11 +152,11 @@ _SQL_TYPE_MAP: dict[str, str] = {
 @dataclass(kw_only=True, frozen=True)
 class TypeResolver:
     catalog: Catalog
-    package_name: str
+    module_name: str
     to_pascal_fn: Callable[[str], str]
     to_snake_fn: Callable[[str], str]
     type_overrides: dict[str, str]
-    json_col_overrides: dict[tuple[str, str], str]
+    json_column_type_overrides: dict[tuple[str, str], str]
 
     def column_spec(self, column: Column) -> ColumnSpec:
         _, py_type, json_type = self._resolve(column)
@@ -188,7 +185,10 @@ class TypeResolver:
         json_type = None
         if column.table is not None:
             col_name = column.original_name or column.name
-            json_type = self.json_col_overrides.get((column.table.name, col_name))
+            json_type = self.json_column_type_overrides.get((
+                column.table.name,
+                col_name,
+            ))
 
         if json_type:
             py_type = json_type
@@ -198,8 +198,8 @@ class TypeResolver:
             py_type = _SQL_TYPE_MAP[db_type]
         elif self.catalog.schema_by_ref(column.type).has_enum(db_type):
             py_type = (
-                self.to_pascal_fn(f"{self.package_name}_{self.to_snake_fn(db_type)}")
-                if self.package_name
+                self.to_pascal_fn(f"{self.module_name}_{self.to_snake_fn(db_type)}")
+                if self.module_name
                 else "str"
             )
         else:
@@ -234,14 +234,14 @@ def collect_used_enums(sqlc_res: SQLCResult) -> set[tuple[str, str]]:
 def map_sqlc_error(
     error: str,
     block_starts: list[tuple[int, str]],
-    all_locations: dict[str, list[str]],
+    query_locations_by_name: dict[str, list[str]],
 ) -> str:
     def replace(m: re.Match[str]) -> str:
         line = int(m.group(1))
         name = next((n for start, n in reversed(block_starts) if start <= line), None)
         if name is None:
             return m.group(0)
-        locations = all_locations.get(name)
+        locations = query_locations_by_name.get(name)
         if not locations:
             return m.group(0)
         return f"{', '.join(locations)}:"
@@ -249,12 +249,12 @@ def map_sqlc_error(
     return re.sub(r"queries\.sql:(\d+)(?::\d+)?:", replace, error)
 
 
-def generate_sql_package(  # noqa: PLR0913, PLR0914
+def generate_sql_module(  # noqa: PLR0913, PLR0914
     *,
     schema_path: Path,
-    package_full_name: str,
-    dsn_import: str,
-    pool_options_import: str | None = None,
+    module_full_name: str,
+    dsn_expr: str,
+    pool_options_expr: str | None = None,
     application_name: str | None = None,
     type_overrides: dict[str, str] | None = None,
     json_model_overrides: dict[str, str] | None = None,
@@ -264,16 +264,16 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
     src_path: Path = Path(),
     tempdir_path: Path | None = None,
 ) -> bool:
-    package_name = package_full_name.rsplit(".", maxsplit=1)[-1]
-    sql_fn_name = f"{package_name}_sql"
+    module_name = module_full_name.rsplit(".", maxsplit=1)[-1]
+    sql_fn_name = f"{module_name}_sql"
 
-    queries, all_locations = collect_queries(src_path, sql_fn_name)
+    queries, query_locations_by_name = collect_queries(src_path, sql_fn_name)
 
-    dsn_ref = ModuleExprRef.parse(dsn_import)
+    dsn_ref = ModuleExprRef.parse(dsn_expr)
     dsn = dsn_ref.evaluate(expected_type=str)
     pool_options_ref = (
-        ModuleExprRef.parse(pool_options_import)
-        if pool_options_import is not None
+        ModuleExprRef.parse(pool_options_expr)
+        if pool_options_expr is not None
         else None
     )
     if pool_options_ref is not None:
@@ -281,31 +281,31 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
 
     sqlc_res, block_starts = run_sqlc(
         src_path / schema_path,
-        [(q.name, q.stmt) for q in queries],
+        [(q.name, q.sql) for q in queries],
         dsn=dsn,
         debug_path=debug_path,
         tempdir_path=tempdir_path,
     )
 
     if sqlc_res.error:
-        mapped = map_sqlc_error(sqlc_res.error, block_starts, all_locations)
+        mapped = map_sqlc_error(sqlc_res.error, block_starts, query_locations_by_name)
         logger.error(f"Error running SQLC:\n{mapped}")
         return False
 
-    json_import_block, json_col_overrides = resolve_json_model_overrides(
+    json_import_block, json_column_type_overrides = resolve_json_model_overrides(
         json_model_overrides or {}, sqlc_res.catalog
     )
 
     resolver = TypeResolver(
         catalog=sqlc_res.catalog,
-        package_name=package_name,
+        module_name=module_name,
         to_pascal_fn=to_pascal_fn,
         to_snake_fn=to_snake_fn,
         type_overrides=type_overrides or {},
-        json_col_overrides=json_col_overrides,
+        json_column_type_overrides=json_column_type_overrides,
     )
 
-    ordered_entities, result_types = map_entities(
+    ordered_entities, query_result_types = build_entities(
         sqlc_res.queries,
         sqlc_res.used_schemas(),
         queries,
@@ -317,27 +317,27 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
     used_enums = collect_used_enums(sqlc_res)
 
     enums = sorted(
-        render_enum_class(e, package_name, to_pascal_fn, to_snake_fn)
+        render_enum_class(e, module_name, to_pascal_fn, to_snake_fn)
         for schema in sqlc_res.catalog.schemas
         for e in schema.enums
         if (schema.name, e.name) in used_enums
     )
 
     query_classes = render_query_classes(
-        sqlc_res.queries, queries, resolver, result_types, all_locations
+        sqlc_res.queries, queries, resolver, query_result_types, query_locations_by_name
     )
 
     query_overloads = [
-        render_query_overload(sql_fn_name, q.name, q.stmt, q.row_type) for q in queries
+        render_query_overload(sql_fn_name, q.name, q.sql, q.row_type) for q in queries
     ]
 
-    query_dict_entries = [render_query_dict_entry(q.name, q.stmt) for q in queries]
+    query_dict_entries = [render_query_dict_entry(q.name, q.sql) for q in queries]
 
-    target_package_path = src_path / f"{package_full_name.replace('.', '/')}.py"
+    target_module_path = src_path / f"{module_full_name.replace('.', '/')}.py"
 
-    new_content = render_package(
+    new_content = render_module(
         dsn_ref,
-        package_name,
+        module_name,
         sql_fn_name,
         entities,
         enums,
@@ -348,9 +348,9 @@ def generate_sql_package(  # noqa: PLR0913, PLR0914
         json_import_block,
         pool_options_ref,
     )
-    changed = write_if_changed(target_package_path, new_content + "\n")
+    changed = write_if_changed(target_module_path, new_content + "\n")
     if changed:
-        logger.info(f"Generated SQL package {package_full_name}")
+        logger.info(f"Generated SQL module {module_full_name}")
     return changed
 
 
@@ -358,23 +358,23 @@ def collect_queries(
     src_path: Path, sql_fn_name: str
 ) -> tuple[list["CodeQuery"], defaultdict[str, list[str]]]:
     raw = list(find_all_queries(src_path, sql_fn_name))
-    validate_stmt_has_single_row_type(raw)
-    all_locations: defaultdict[str, list[str]] = defaultdict(list)
+    validate_sql_has_single_row_type(raw)
+    query_locations_by_name: defaultdict[str, list[str]] = defaultdict(list)
     first_occurrence: dict[str, CodeQuery] = {}
     for q in raw:
-        all_locations[q.name].append(q.location)
+        query_locations_by_name[q.name].append(q.location)
         if q.name not in first_occurrence:
             first_occurrence[q.name] = q
     queries = sorted(first_occurrence.values(), key=lambda q: (q.file, q.lineno))
-    return queries, all_locations
+    return queries, query_locations_by_name
 
 
 def render_query_classes(
     sqlc_queries: tuple[Query, ...],
     queries: list["CodeQuery"],
     resolver: TypeResolver,
-    result_types: dict[str, str],
-    all_locations: defaultdict[str, list[str]],
+    query_result_types: dict[str, str],
+    query_locations_by_name: defaultdict[str, list[str]],
 ) -> list[str]:
     query_order = {q.name: i for i, q in enumerate(queries)}
     return [
@@ -389,14 +389,14 @@ def render_query_classes(
                 )
                 for p in q.params
             ],
-            result_types[q.name],
+            query_result_types[q.name],
             len(q.columns),
             (
                 resolver.column_spec(q.columns[0]).json_type
                 if len(q.columns) == 1
                 else None
             ),
-            all_locations[q.name],
+            query_locations_by_name[q.name],
         )
         for q in sorted(sqlc_queries, key=lambda q: query_order[q.name])
     ]
@@ -459,9 +459,9 @@ def resolve_json_model_overrides(
     return import_block, col_overrides
 
 
-def render_package(  # noqa: PLR0913, PLR0917
+def render_module(  # noqa: PLR0913, PLR0917
     dsn_ref: ModuleExprRef,
-    package_name: str,
+    module_name: str,
     sql_fn_name: str,
     entities: list[str],
     enums: list[str],
@@ -475,7 +475,7 @@ def render_package(  # noqa: PLR0913, PLR0917
     imports = [f"from {dsn_ref.module_name} import {dsn_ref.import_name}"]
     pool_args = [
         dsn_ref.module_expr,
-        f'name="{package_name}"',
+        f'name="{module_name}"',
         f"application_name={application_name!r}",
     ]
     if pool_options_ref is not None:
@@ -524,39 +524,39 @@ from iron_sql import runtime
 {imports_block}
 
 
-{package_name.upper()}_POOL = runtime.ConnectionPool(
+{module_name.upper()}_POOL = runtime.ConnectionPool(
     {pool_args_str},
 )
 
-_{package_name}_connection = ContextVar[psycopg.AsyncConnection | None](
-    "_{package_name}_connection",
+_{module_name}_connection = ContextVar[psycopg.AsyncConnection | None](
+    "_{module_name}_connection",
     default=None,
 )
 
 
 @asynccontextmanager
-async def {package_name}_connection() -> AsyncIterator[psycopg.AsyncConnection]:
-    async with {package_name.upper()}_POOL.connection_in_context(_{package_name}_connection) as conn:
+async def {module_name}_connection() -> AsyncIterator[psycopg.AsyncConnection]:
+    async with {module_name.upper()}_POOL.connection_in_context(_{module_name}_connection) as conn:
         yield conn
 
 
 @asynccontextmanager
-async def {package_name}_transaction() -> AsyncIterator[None]:
-    async with {package_name}_connection() as conn, conn.transaction():
+async def {module_name}_transaction() -> AsyncIterator[None]:
+    async with {module_name}_connection() as conn, conn.transaction():
         yield
 
 
 @asynccontextmanager
-async def {package_name}_listen_session(
+async def {module_name}_listen_session(
     channel: str,
 ) -> AsyncIterator[AsyncGenerator[str]]:
-    async with {package_name.upper()}_POOL.connection() as conn:
+    async with {module_name.upper()}_POOL.connection() as conn:
         async with runtime.listen(conn, channel) as payloads:
             yield payloads
 
 
-async def {package_name}_notify(channel: str, payload: str = "") -> None:
-    async with {package_name}_connection() as conn:
+async def {module_name}_notify(channel: str, payload: str = "") -> None:
+    async with {module_name}_connection() as conn:
         await runtime.notify(conn, channel, payload)
 
 
@@ -567,7 +567,7 @@ async def {package_name}_notify(channel: str, payload: str = "") -> None:
 
 
 class Query[T](runtime.Query[T]):
-    _connection_factory = staticmethod({package_name}_connection)
+    _connection_factory = staticmethod({module_name}_connection)
 
 
 {"\n\n\n".join(query_classes)}
@@ -580,13 +580,13 @@ _QUERIES: dict[str, type[Query]] = {{
 
 {"\n".join(query_overloads)}
 @overload
-def {sql_fn_name}(stmt: str) -> Query: ...
+def {sql_fn_name}(sql: str) -> Query: ...
 
 
-def {sql_fn_name}(stmt: str, row_type: str | None = None) -> Query:
-    if stmt in _QUERIES:
-        return _QUERIES[stmt]()
-    msg = f"Unknown statement: {{stmt!r}}"
+def {sql_fn_name}(sql: str, row_type: str | None = None) -> Query:
+    if sql in _QUERIES:
+        return _QUERIES[sql]()
+    msg = f"Unknown statement: {{sql!r}}"
     raise KeyError(msg)
 
     """.strip()  # noqa: E501
@@ -594,11 +594,11 @@ def {sql_fn_name}(stmt: str, row_type: str | None = None) -> Query:
 
 def render_enum_class(
     enum: Enum,
-    package_name: str,
+    module_name: str,
     to_pascal_fn: Callable[[str], str],
     to_snake_fn: Callable[[str], str],
 ) -> str:
-    class_name = to_pascal_fn(f"{package_name}_{to_snake_fn(enum.name)}")
+    class_name = to_pascal_fn(f"{module_name}_{to_snake_fn(enum.name)}")
     members = []
     seen_names: dict[str, int] = {}
 
@@ -654,7 +654,7 @@ def deduplicate_params(params: list[ParamSpec]) -> list[ParamSpec]:
 
 def render_query_class(
     query_name: str,
-    stmt: str,
+    sql: str,
     query_params: list[ParamSpec],
     result: str,
     columns_num: int,
@@ -729,7 +729,7 @@ async def execute({", ".join(query_fn_params)}) -> None:
 
 class {query_name}(Query[{result}]):
     # See: {", ".join(locations)}
-    _stmt = psycopg.sql.SQL({stmt!r})
+    _stmt = psycopg.sql.SQL({sql!r})
     _row_factory = staticmethod({row_factory})
 
     {indent_block(methods, "    ")}
@@ -738,7 +738,7 @@ class {query_name}(Query[{result}]):
 
 
 def render_query_overload(
-    sql_fn_name: str, query_name: str, stmt: str, row_type: str | None
+    sql_fn_name: str, query_name: str, sql: str, row_type: str | None
 ) -> str:
     result_arg = ""
     if row_type:
@@ -747,25 +747,25 @@ def render_query_overload(
     return f"""
 
 @overload
-def {sql_fn_name}(stmt: Literal[{stmt!r}]{result_arg}) -> {query_name}: ...
+def {sql_fn_name}(sql: Literal[{sql!r}]{result_arg}) -> {query_name}: ...
 
     """.strip()
 
 
-def render_query_dict_entry(query_name: str, stmt: str) -> str:
-    return f"{stmt!r}: {query_name}"
+def render_query_dict_entry(query_name: str, sql: str) -> str:
+    return f"{sql!r}: {query_name}"
 
 
 @dataclass(kw_only=True, frozen=True)
 class CodeQuery:
-    stmt: str
+    sql: str
     row_type: str | None
     file: Path
     lineno: int
 
     @property
     def name(self) -> str:
-        md5_hash = hashlib.md5(self.stmt.encode(), usedforsecurity=False).hexdigest()
+        md5_hash = hashlib.md5(self.sql.encode(), usedforsecurity=False).hexdigest()
         return f"Query_{md5_hash}{'_' + self.row_type if self.row_type else ''}"
 
     @property
@@ -776,17 +776,17 @@ class CodeQuery:
 @dataclass(kw_only=True, frozen=True)
 class SQLEntity:
     resolver: TypeResolver
-    set_name: str | None
+    explicit_name: str | None
     table_name: str | None
     columns: tuple[Column, ...]
 
     @property
     def name(self) -> str:
-        if self.set_name:
-            return self.set_name
+        if self.explicit_name:
+            return self.explicit_name
         if self.table_name:
             return self.resolver.to_pascal_fn(
-                f"{self.resolver.package_name}_{inflection.singularize(self.table_name)}"
+                f"{self.resolver.module_name}_{inflection.singularize(self.table_name)}"
             )
         hash_base = repr(self.column_specs)
         md5_hash = hashlib.md5(hash_base.encode(), usedforsecurity=False).hexdigest()
@@ -797,7 +797,7 @@ class SQLEntity:
         return tuple(self.resolver.column_spec(c) for c in self.columns)
 
 
-def map_entities(
+def build_entities(
     queries_from_sqlc: tuple[Query, ...],
     used_schemas: tuple[str, ...],
     queries_from_code: list[CodeQuery],
@@ -808,7 +808,7 @@ def map_entities(
     table_entities = [
         SQLEntity(
             resolver=resolver,
-            set_name=None,
+            explicit_name=None,
             table_name=t.rel.name,
             columns=t.columns,
         )
@@ -828,7 +828,7 @@ def map_entities(
     query_result_entities = {
         q.name: SQLEntity(
             resolver=resolver,
-            set_name=row_types[q.name],
+            explicit_name=row_types[q.name],
             table_name=None,
             columns=q.columns,
         )
@@ -845,17 +845,17 @@ def map_entities(
         key=lambda e: (e.table_name is None, e.table_name or ""),
     )
 
-    result_types = {}
+    query_result_types = {}
     for q in queries_from_sqlc:
         if len(q.columns) == 0:
-            result_types[q.name] = "None"
+            query_result_types[q.name] = "None"
         elif len(q.columns) == 1:
-            result_types[q.name] = resolver.column_spec(q.columns[0]).py_type
+            query_result_types[q.name] = resolver.column_spec(q.columns[0]).py_type
         else:
             column_specs = query_result_entities[q.name].column_specs
-            result_types[q.name] = unique_entities[column_specs].name
+            query_result_types[q.name] = unique_entities[column_specs].name
 
-    return ordered_entities, result_types
+    return ordered_entities, query_result_types
 
 
 def find_fn_calls(
@@ -882,11 +882,11 @@ def find_all_queries(src_path: Path, sql_fn_name: str) -> Iterator[CodeQuery]:
     for file, lineno, node in find_fn_calls(src_path, sql_fn_name):
         relative_path = file.relative_to(src_path)
 
-        stmt_arg = node.args[0]
+        sql_arg = node.args[0]
         if (
             len(node.args) != 1
-            or not isinstance(stmt_arg, ast.Constant)
-            or not isinstance(stmt_arg.value, str)
+            or not isinstance(sql_arg, ast.Constant)
+            or not isinstance(sql_arg.value, str)
         ):
             msg = (
                 f"Invalid positional arguments for {sql_fn_name} "
@@ -895,7 +895,7 @@ def find_all_queries(src_path: Path, sql_fn_name: str) -> Iterator[CodeQuery]:
             )
             raise TypeError(msg)
 
-        stmt = stmt_arg.value
+        sql = sql_arg.value
 
         row_type = None
         for kw in node.keywords:
@@ -912,18 +912,18 @@ def find_all_queries(src_path: Path, sql_fn_name: str) -> Iterator[CodeQuery]:
                 break
 
         yield CodeQuery(
-            stmt=stmt,
+            sql=sql,
             row_type=row_type,
             file=relative_path,
             lineno=lineno,
         )
 
 
-def validate_stmt_has_single_row_type(queries: list[CodeQuery]) -> None:
-    first_by_stmt: dict[str, CodeQuery] = {}
+def validate_sql_has_single_row_type(queries: list[CodeQuery]) -> None:
+    first_by_sql: dict[str, CodeQuery] = {}
     for query in queries:
-        if query.stmt in first_by_stmt:
-            first = first_by_stmt[query.stmt]
+        if query.sql in first_by_sql:
+            first = first_by_sql[query.sql]
             if query.row_type != first.row_type:
                 msg = (
                     f"row_type conflict: {first.location} has {first.row_type!r},"
@@ -931,4 +931,4 @@ def validate_stmt_has_single_row_type(queries: list[CodeQuery]) -> None:
                 )
                 raise ValueError(msg)
         else:
-            first_by_stmt[query.stmt] = query
+            first_by_sql[query.sql] = query

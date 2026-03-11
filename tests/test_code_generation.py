@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from iron_sql.codegen import generate_sql_package
+from iron_sql.codegen import generate_sql_module
 from iron_sql.codegen.generator import ModuleExprRef
 from iron_sql.codegen.sqlc import run_sqlc
 from tests.conftest import ProjectBuilder
@@ -27,7 +27,7 @@ q3 = testdb_sql("SELECT id FROM users")
     test_project.generate_no_import()
 
     generated = (
-        test_project.src_path / f"{test_project.pkg_name.replace('.', '/')}.py"
+        test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
     ).read_text()
 
     see_lines = [
@@ -238,7 +238,7 @@ def get_dsn() -> str:
     assert expr_ref.evaluate(expected_type=str) == test_project.dsn
 
 
-def test_dsn_import_with_function_call(test_project: ProjectBuilder) -> None:
+def test_dsn_expr_with_function_call(test_project: ProjectBuilder) -> None:
     (test_project.app_dir / "config.py").write_text(
         f"""
 class Config:
@@ -257,22 +257,22 @@ CONFIG = Config("{test_project.dsn}")
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
 
-    generate_sql_package(
+    generate_sql_module(
         schema_path=Path("schema.sql"),
-        package_full_name=test_project.pkg_name,
-        dsn_import=f"{test_project.app_pkg}.config:CONFIG.get_dsn()",
+        module_full_name=test_project.module_full_name,
+        dsn_expr=f"{test_project.app_pkg}.config:CONFIG.get_dsn()",
         src_path=test_project.src_path,
         tempdir_path=test_project.src_path,
     )
 
     generated_path = (
-        test_project.src_path / f"{test_project.pkg_name.replace('.', '/')}.py"
+        test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
     )
     generated = generated_path.read_text()
     assert "CONFIG.get_dsn()" in generated
 
 
-def test_dsn_import_with_factory_call_generates_valid_python(
+def test_dsn_expr_with_factory_call_generates_valid_python(
     test_project: ProjectBuilder,
 ) -> None:
     (test_project.app_dir / "config.py").write_text(
@@ -289,16 +289,16 @@ def get_dsn() -> str:
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
 
-    generate_sql_package(
+    generate_sql_module(
         schema_path=Path("schema.sql"),
-        package_full_name=test_project.pkg_name,
-        dsn_import=f"{test_project.app_pkg}.config:get_dsn()",
+        module_full_name=test_project.module_full_name,
+        dsn_expr=f"{test_project.app_pkg}.config:get_dsn()",
         src_path=test_project.src_path,
         tempdir_path=test_project.src_path,
     )
 
     generated_path = (
-        test_project.src_path / f"{test_project.pkg_name.replace('.', '/')}.py"
+        test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
     )
     generated = generated_path.read_text()
     assert f"from {test_project.app_pkg}.config import get_dsn" in generated
@@ -306,7 +306,7 @@ def get_dsn() -> str:
     parse(generated)
 
 
-def test_pool_options_import(test_project: ProjectBuilder) -> None:
+def test_pool_options_expr(test_project: ProjectBuilder) -> None:
     config = (
         f'DSN = "{test_project.dsn}"\nPOOL_OPTIONS = {{"min_size": 1, "max_size": 5}}\n'
     )
@@ -317,24 +317,24 @@ def test_pool_options_import(test_project: ProjectBuilder) -> None:
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
 
-    generate_sql_package(
+    generate_sql_module(
         schema_path=Path("schema.sql"),
-        package_full_name=test_project.pkg_name,
-        dsn_import=f"{test_project.app_pkg}.config:DSN",
-        pool_options_import=f"{test_project.app_pkg}.config:POOL_OPTIONS",
+        module_full_name=test_project.module_full_name,
+        dsn_expr=f"{test_project.app_pkg}.config:DSN",
+        pool_options_expr=f"{test_project.app_pkg}.config:POOL_OPTIONS",
         src_path=test_project.src_path,
         tempdir_path=test_project.src_path,
     )
 
     generated_path = (
-        test_project.src_path / f"{test_project.pkg_name.replace('.', '/')}.py"
+        test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
     )
     generated = generated_path.read_text()
     assert f"from {test_project.app_pkg}.config import POOL_OPTIONS" in generated
     assert "pool_options=POOL_OPTIONS" in generated
 
 
-def test_pool_options_import_factory_generates_valid_python(
+def test_pool_options_expr_factory_generates_valid_python(
     test_project: ProjectBuilder,
 ) -> None:
     config = f"""DSN = "{test_project.dsn}"
@@ -349,17 +349,17 @@ def get_pool_options() -> dict[str, object]:
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
 
-    generate_sql_package(
+    generate_sql_module(
         schema_path=Path("schema.sql"),
-        package_full_name=test_project.pkg_name,
-        dsn_import=f"{test_project.app_pkg}.config:DSN",
-        pool_options_import=f"{test_project.app_pkg}.config:get_pool_options()",
+        module_full_name=test_project.module_full_name,
+        dsn_expr=f"{test_project.app_pkg}.config:DSN",
+        pool_options_expr=f"{test_project.app_pkg}.config:get_pool_options()",
         src_path=test_project.src_path,
         tempdir_path=test_project.src_path,
     )
 
     generated_path = (
-        test_project.src_path / f"{test_project.pkg_name.replace('.', '/')}.py"
+        test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
     )
     generated = generated_path.read_text()
     assert f"from {test_project.app_pkg}.config import get_pool_options" in generated
@@ -367,7 +367,7 @@ def get_pool_options() -> dict[str, object]:
     parse(generated)
 
 
-def test_pool_options_import_invalid_fails_during_generation(
+def test_pool_options_expr_invalid_fails_during_generation(
     test_project: ProjectBuilder,
 ) -> None:
     config = f'DSN = "{test_project.dsn}"\n'
@@ -379,27 +379,27 @@ def test_pool_options_import_invalid_fails_during_generation(
         sys.path.insert(0, str(test_project.src_path))
 
     with pytest.raises(NameError, match="MISSING_POOL_OPTIONS"):
-        generate_sql_package(
+        generate_sql_module(
             schema_path=Path("schema.sql"),
-            package_full_name=test_project.pkg_name,
-            dsn_import=f"{test_project.app_pkg}.config:DSN",
-            pool_options_import=f"{test_project.app_pkg}.config:MISSING_POOL_OPTIONS",
+            module_full_name=test_project.module_full_name,
+            dsn_expr=f"{test_project.app_pkg}.config:DSN",
+            pool_options_expr=f"{test_project.app_pkg}.config:MISSING_POOL_OPTIONS",
             src_path=test_project.src_path,
             tempdir_path=test_project.src_path,
         )
 
     generated_path = (
-        test_project.src_path / f"{test_project.pkg_name.replace('.', '/')}.py"
+        test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
     )
     assert not generated_path.exists()
 
 
-def test_pool_options_import_not_set(test_project: ProjectBuilder) -> None:
+def test_pool_options_expr_not_set(test_project: ProjectBuilder) -> None:
     test_project.add_query("q", "SELECT 1 as value")
     test_project.generate_no_import()
 
     generated_path = (
-        test_project.src_path / f"{test_project.pkg_name.replace('.', '/')}.py"
+        test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
     )
     generated = generated_path.read_text()
     assert "**" not in generated

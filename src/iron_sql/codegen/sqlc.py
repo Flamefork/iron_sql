@@ -159,8 +159,8 @@ def run_sqlc(
         block_starts: list[tuple[int, str]] = []
         blocks: list[str] = []
         current_line = 1
-        for name, stmt in queries:
-            block = f"-- name: {name} :exec\n{preprocess_sql(stmt)};"
+        for name, sql in queries:
+            block = f"-- name: {name} :exec\n{preprocess_sql(sql)};"
             block_starts.append((current_line, name))
             current_line += block.count("\n") + 2
             blocks.append(block)
@@ -214,6 +214,6 @@ def run_sqlc(
         ), block_starts
 
 
-def preprocess_sql(stmt: str) -> str:
-    stmt = re.sub(r"@(\w+)\?", r"sqlc.narg('\1')", stmt)
-    return textwrap.dedent(stmt).strip()
+def preprocess_sql(sql: str) -> str:
+    sql = re.sub(r"@(\w+)\?", r"sqlc.narg('\1')", sql)
+    return textwrap.dedent(sql).strip()
