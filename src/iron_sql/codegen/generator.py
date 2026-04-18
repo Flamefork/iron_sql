@@ -535,13 +535,13 @@ _{module_name}_connection = ContextVar[psycopg.AsyncConnection | None](
 
 
 @asynccontextmanager
-async def {module_name}_connection() -> AsyncIterator[psycopg.AsyncConnection]:
+async def {module_name}_connection() -> AsyncGenerator[psycopg.AsyncConnection]:
     async with {module_name.upper()}_POOL.connection_in_context(_{module_name}_connection) as conn:
         yield conn
 
 
 @asynccontextmanager
-async def {module_name}_transaction() -> AsyncIterator[None]:
+async def {module_name}_transaction() -> AsyncGenerator[None]:
     async with {module_name}_connection() as conn, conn.transaction():
         yield
 
@@ -549,7 +549,7 @@ async def {module_name}_transaction() -> AsyncIterator[None]:
 @asynccontextmanager
 async def {module_name}_listen_session(
     channel: str,
-) -> AsyncIterator[AsyncGenerator[str]]:
+) -> AsyncGenerator[AsyncGenerator[str]]:
     async with {module_name.upper()}_POOL.connection() as conn:
         async with runtime.listen(conn, channel) as payloads:
             yield payloads

@@ -79,7 +79,7 @@ async def test_pool_connection_reraises_cancelled_error_swallowed_by_pool(
     exited = False
 
     @asynccontextmanager
-    async def fake_connection():  # noqa: RUF029
+    async def fake_connection():
         nonlocal entered, exited
         entered = True
         task = asyncio.current_task()

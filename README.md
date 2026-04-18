@@ -73,7 +73,7 @@ The `sqlc` binary is bundled automatically via the `sqlc` Python package.
 - `ConnectionPool` opens lazily and reopens after `close()`, with `ContextVar`-based connection reuse for nested contexts.
 - `*_listen_session()` uses a dedicated pooled connection and doesn't reuse `ContextVar` transaction connections.
 - `query_single_row()` raises `NoRowsError`; `query_optional_row()` returns `None`. Both raise `TooManyRowsError` on 2+ rows.
-- `query_stream()` returns an async context manager yielding an `AsyncIterator`; uses server-side cursors with automatic transaction management.
+- `query_stream()` returns an async context manager yielding an `AsyncGenerator`; uses server-side cursors with automatic transaction management.
 - JSONB params are sent with `psycopg.types.json.Jsonb`; JSON with `psycopg.types.json.Json`. Scalar row factories validate types at runtime.
 - `json_validated` decorator applies Pydantic model validation to dataclass fields on construction.
 

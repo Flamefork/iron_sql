@@ -3,7 +3,6 @@ import contextlib
 import itertools
 import types
 from collections.abc import AsyncGenerator
-from collections.abc import AsyncIterator
 from collections.abc import Awaitable
 from collections.abc import Callable
 from collections.abc import Sequence
@@ -45,7 +44,7 @@ class TooManyRowsError(Exception):
 @asynccontextmanager
 async def listen(
     conn: psycopg.AsyncConnection, channel: str
-) -> AsyncIterator[AsyncGenerator[str]]:
+) -> AsyncGenerator[AsyncGenerator[str]]:
     _validate_channel(channel)
     if await _has_active_listen_subscriptions(conn):
         msg = "listen() requires a connection without active LISTEN subscriptions"
@@ -114,7 +113,7 @@ def _next_cursor_name() -> str:
 
 
 @asynccontextmanager
-async def _ensure_transaction(conn: psycopg.AsyncConnection) -> AsyncIterator[None]:
+async def _ensure_transaction(conn: psycopg.AsyncConnection) -> AsyncGenerator[None]:
     match conn.info.transaction_status:
         case psycopg.pq.TransactionStatus.IDLE:
             async with conn.transaction():
@@ -141,7 +140,7 @@ class Query[T]:
     @asynccontextmanager
     async def _client_cursor(
         self, params: psycopg.abc.Params | None
-    ) -> AsyncIterator[psycopg.AsyncRawCursor[T]]:
+    ) -> AsyncGenerator[psycopg.AsyncRawCursor[T]]:
         async with (
             self._connection_factory() as conn,
             psycopg.AsyncRawCursor(conn, row_factory=self._row_factory) as cur,
@@ -152,7 +151,7 @@ class Query[T]:
     @asynccontextmanager
     async def _server_cursor(
         self, params: psycopg.abc.Params | None
-    ) -> AsyncIterator[psycopg.AsyncRawServerCursor[T]]:
+    ) -> AsyncGenerator[psycopg.AsyncRawServerCursor[T]]:
         async with (
             self._connection_factory() as conn,
             _ensure_transaction(conn),
@@ -218,7 +217,7 @@ class ConnectionPool:
         await self.psycopg_pool.check()
 
     @asynccontextmanager
-    async def connection(self) -> AsyncIterator[psycopg.AsyncConnection]:
+    async def connection(self) -> AsyncGenerator[psycopg.AsyncConnection]:
         task = asyncio.current_task()
         cancelling_before = 0 if task is None else task.cancelling()
         await self.psycopg_pool.open()
@@ -251,7 +250,7 @@ class ConnectionPool:
     @asynccontextmanager
     async def connection_in_context(
         self, context_var: ContextVar[psycopg.AsyncConnection | None]
-    ) -> AsyncIterator[psycopg.AsyncConnection]:
+    ) -> AsyncGenerator[psycopg.AsyncConnection]:
         conn = context_var.get()
         if conn is not None:
             yield conn

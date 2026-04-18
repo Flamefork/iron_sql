@@ -3,7 +3,7 @@ import shutil
 import sys
 import textwrap
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -110,9 +110,8 @@ def pg_test_dsn(pg_dsn: str, pg_template_db: str) -> Iterator[str]:
         )
 
     base_dsn = pg_dsn.rsplit("/", 1)[0]
-    test_dsn = f"{base_dsn}/{dbname}"
 
-    yield test_dsn
+    yield f"{base_dsn}/{dbname}"
 
     with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute(
@@ -128,7 +127,7 @@ def pg_test_dsn(pg_dsn: str, pg_template_db: str) -> Iterator[str]:
 
 
 @pytest.fixture
-async def pool(pg_dsn: str) -> AsyncIterator[ConnectionPool]:
+async def pool(pg_dsn: str) -> AsyncGenerator[ConnectionPool]:
     p = ConnectionPool(pg_dsn, name="test_pool")
     yield p
     await p.close()
@@ -247,7 +246,7 @@ async def test_project(
     request: pytest.FixtureRequest,
     pg_test_dsn: str,
     schema_path: Path,
-) -> AsyncIterator[ProjectBuilder]:
+) -> AsyncGenerator[ProjectBuilder]:
     clean_name = request.node.name.replace("[", "_").replace("]", "_").replace("-", "_")
     builder = ProjectBuilder(tmp_path, pg_test_dsn, clean_name, schema_path)
 

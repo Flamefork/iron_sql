@@ -45,13 +45,13 @@ _mydb_connection = ContextVar[psycopg.AsyncConnection | None](
 
 
 @asynccontextmanager
-async def mydb_connection() -> AsyncIterator[psycopg.AsyncConnection]:
+async def mydb_connection() -> AsyncGenerator[psycopg.AsyncConnection]:
     async with MYDB_POOL.connection_in_context(_mydb_connection) as conn:
         yield conn
 
 
 @asynccontextmanager
-async def mydb_transaction() -> AsyncIterator[None]:
+async def mydb_transaction() -> AsyncGenerator[None]:
     async with mydb_connection() as conn, conn.transaction():
         yield
 
@@ -59,7 +59,7 @@ async def mydb_transaction() -> AsyncIterator[None]:
 @asynccontextmanager
 async def mydb_listen_session(
     channel: str,
-) -> AsyncIterator[AsyncGenerator[str]]:
+) -> AsyncGenerator[AsyncGenerator[str]]:
     async with MYDB_POOL.connection() as conn:
         async with runtime.listen(conn, channel) as payloads:
             yield payloads
