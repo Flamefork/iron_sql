@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 from typing import Literal
 from typing import overload
 
@@ -282,7 +283,7 @@ class Query_29c838280e39383dd6b0760431eb3e60(Query[int]):
         return self._server_cursor((status,))
 
 
-_QUERIES: dict[str, type[Query]] = {
+_QUERIES: dict[str, type[Query[Any]]] = {
     '\n            INSERT INTO users (id, username, email)\n            VALUES (@id, @username, @email)\n            ': Query_3ee53b6909da8b4496346dda36c9f442,
     '\n            INSERT INTO projects (id, name, owner_id, settings)\n            VALUES (@id, @name, @owner_id, @settings)\n            ': Query_67ac0768d48a654b1a305124c92372e8,
     '\n        INSERT INTO tasks (id, project_id, title, priority, assignee_id, metadata, due_date)\n        VALUES (@id, @project_id, @title, @priority, @assignee_id?, @metadata?, @due_date?)\n        ': Query_bd4c62c78a942bfd1f087f87a19f2743,
@@ -317,10 +318,10 @@ def mydb_sql(sql: Literal['SELECT id FROM tasks WHERE project_id = @project_id A
 @overload
 def mydb_sql(sql: Literal['SELECT count(*) FROM tasks WHERE status = @status']) -> Query_29c838280e39383dd6b0760431eb3e60: ...
 @overload
-def mydb_sql(sql: str) -> Query: ...
+def mydb_sql(sql: str) -> Query[Any]: ...
 
 
-def mydb_sql(sql: str, row_type: str | None = None) -> Query:
+def mydb_sql(sql: str, row_type: str | None = None) -> Query[Any]:
     if sql in _QUERIES:
         return _QUERIES[sql]()
     msg = f"Unknown statement: {sql!r}"

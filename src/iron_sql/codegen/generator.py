@@ -511,6 +511,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 from typing import Literal
 from typing import overload
 
@@ -573,17 +574,17 @@ class Query[T](runtime.Query[T]):
 {"\n\n\n".join(query_classes)}
 
 
-_QUERIES: dict[str, type[Query]] = {{
+_QUERIES: dict[str, type[Query[Any]]] = {{
     {(",\n    ").join(query_dict_entries)}
 }}
 
 
 {"\n".join(query_overloads)}
 @overload
-def {sql_fn_name}(sql: str) -> Query: ...
+def {sql_fn_name}(sql: str) -> Query[Any]: ...
 
 
-def {sql_fn_name}(sql: str, row_type: str | None = None) -> Query:
+def {sql_fn_name}(sql: str, row_type: str | None = None) -> Query[Any]:
     if sql in _QUERIES:
         return _QUERIES[sql]()
     msg = f"Unknown statement: {{sql!r}}"
