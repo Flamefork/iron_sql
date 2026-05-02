@@ -22,6 +22,7 @@ import psycopg.rows
 import psycopg.sql
 import psycopg.types.json
 import psycopg_pool
+from psycopg._cursor_base import BaseCursor
 from pydantic import TypeAdapter
 
 _adapter_cache: dict[object, TypeAdapter[object]] = {}
@@ -338,7 +339,9 @@ def typed_scalar_row[T](
 def typed_scalar_row[T](
     typ: type[T], *, not_null: bool, validate: Callable[[object], T] | None = None
 ) -> psycopg.rows.BaseRowFactory[T | None]:
-    def typed_scalar_row_(cursor) -> psycopg.rows.RowMaker[T | None]:
+    def typed_scalar_row_(
+        cursor: BaseCursor[Any, Any],
+    ) -> psycopg.rows.RowMaker[T | None]:
         scalar_row_ = psycopg.rows.scalar_row(cursor)
 
         def typed_scalar_row__(values: Sequence[Any]) -> T | None:

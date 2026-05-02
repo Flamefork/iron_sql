@@ -2,7 +2,9 @@ import os
 from pathlib import Path
 
 import psycopg
-from testcontainers.postgres import PostgresContainer
+from testcontainers.postgres import (  # pyright: ignore[reportMissingTypeStubs]
+    PostgresContainer,
+)
 
 from iron_sql.codegen import generate_sql_module
 

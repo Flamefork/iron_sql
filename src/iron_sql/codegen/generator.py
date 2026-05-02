@@ -600,7 +600,7 @@ def render_enum_class(
     to_snake_fn: Callable[[str], str],
 ) -> str:
     class_name = to_pascal_fn(f"{module_name}_{to_snake_fn(enum.name)}")
-    members = []
+    members: list[str] = []
     seen_names: dict[str, int] = {}
 
     for val in enum.vals:
@@ -642,7 +642,7 @@ class {name}:
 
 
 def deduplicate_params(params: list[ParamSpec]) -> list[ParamSpec]:
-    seen = defaultdict(int)
+    seen: defaultdict[str, int] = defaultdict(int)
     result: list[ParamSpec] = []
     for param in params:
         seen[param.name] += 1
@@ -846,7 +846,7 @@ def build_entities(
         key=lambda e: (e.table_name is None, e.table_name or ""),
     )
 
-    query_result_types = {}
+    query_result_types: dict[str, str] = {}
     for q in queries_from_sqlc:
         if len(q.columns) == 0:
             query_result_types[q.name] = "None"

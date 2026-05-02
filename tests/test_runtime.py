@@ -133,8 +133,9 @@ async def test_pool_preserves_application_name_from_pool_options_kwargs() -> Non
         "postgresql://example.invalid/db",
         pool_options={"kwargs": {"application_name": "from-pool-options"}},
     )
-    assert isinstance(pool.psycopg_pool.kwargs, dict)
-    assert pool.psycopg_pool.kwargs["application_name"] == "from-pool-options"
+    kwargs = pool.psycopg_pool.kwargs
+    assert isinstance(kwargs, dict)
+    assert kwargs["application_name"] == "from-pool-options"
     await pool.psycopg_pool.close()
 
 

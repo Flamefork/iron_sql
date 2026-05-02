@@ -1,4 +1,5 @@
 import uuid
+from typing import Any
 
 import pytest
 
@@ -83,7 +84,7 @@ async def test_query_stream_early_exit(test_project: ProjectBuilder) -> None:
     for i in range(10):
         await mod.testdb_sql(insert_sql).execute(uuid.uuid4(), f"user{i}")
 
-    collected = []
+    collected: list[Any] = []
     async with mod.testdb_sql(select_sql).query_stream() as stream:
         async for row in stream:
             collected.append(row)

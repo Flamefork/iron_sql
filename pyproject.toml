@@ -26,7 +26,7 @@ dependencies = [
 [project.optional-dependencies]
 codegen = [
     "inflection>=0.5.1",
-    "sqlc>=1.30.0.post18",
+    "sqlc>=1.30.0.post19",
 ]
 
 [project.urls]
@@ -53,14 +53,6 @@ dev = [
 
 [tool.pyright]
 typeCheckingMode = "strict"
-reportUnknownArgumentType = "none"
-reportUnknownLambdaType = "none"
-reportUnknownMemberType = "none"
-reportUnknownParameterType = "none"
-reportUnknownVariableType = "none"
-reportMissingParameterType = "none"
-reportMissingTypeArgument = "none"
-reportMissingTypeStubs = "none"
 deprecateTypingAliases = true
 reportImportCycles = true
 reportUnnecessaryTypeIgnoreComment = true

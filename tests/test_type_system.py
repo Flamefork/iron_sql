@@ -3,6 +3,7 @@ import ipaddress
 import warnings
 from enum import StrEnum
 from typing import Any
+from typing import cast
 from typing import get_args
 
 import pytest
@@ -12,9 +13,11 @@ from tests.conftest import ProjectBuilder
 
 
 def assert_return_types(query: Any, expected: set[type]) -> None:
-    ret = type(query).query_single_row.__annotations__["return"]
+    ret = cast(Any, type(query)).query_single_row.__annotations__["return"]
     ret_args = get_args(ret)
-    actual = {a for a in ret_args if a is not type(None)} if ret_args else {ret}
+    actual: set[Any] = (
+        {a for a in ret_args if a is not type(None)} if ret_args else {ret}
+    )
     assert actual == expected
 
 
@@ -30,8 +33,8 @@ async def test_enum_generation(test_project: ProjectBuilder) -> None:
     enum_cls = mod.TestdbUserStatus
     assert issubclass(enum_cls, StrEnum)
 
-    assert enum_cls.ACTIVE == "active"  # pyright: ignore[reportAttributeAccessIssue]
-    assert enum_cls.INACTIVE == "inactive"  # pyright: ignore[reportAttributeAccessIssue]
+    assert enum_cls.ACTIVE == "active"  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
+    assert enum_cls.INACTIVE == "inactive"  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
 
     row = await mod.testdb_sql(
         "SELECT 'active'::user_status as status"

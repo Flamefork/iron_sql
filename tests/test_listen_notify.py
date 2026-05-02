@@ -88,7 +88,7 @@ async def test_listen_break_stops_iteration(pool: ConnectionPool) -> None:
             for i in range(3):
                 await notify(send_conn, "test_break", str(i))
 
-        received = []
+        received: list[str] = []
         async with asyncio.timeout(5):
             async for value in payloads:
                 received.append(value)

@@ -130,10 +130,11 @@ async def test_list_model_override(test_project: ProjectBuilder) -> None:
 
     tags = [Tag(name="python", color="blue"), Tag(name="rust", color="orange")]
     row = await mod.testdb_sql(insert_sql).query_single_row(tags)
-    assert isinstance(row.tags, list)
-    assert len(row.tags) == 2
-    assert isinstance(row.tags[0], Tag)
-    assert row.tags[0].name == "python"
+    row_tags: list[Tag] = row.tags
+    assert isinstance(row_tags, list)
+    assert len(row_tags) == 2
+    assert isinstance(row_tags[0], Tag)
+    assert row_tags[0].name == "python"
 
 
 async def test_scalar_result_override(test_project: ProjectBuilder) -> None:

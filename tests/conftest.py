@@ -8,11 +8,14 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from typing import LiteralString
+from typing import cast
 
 import psycopg
 import pytest
 from psycopg import sql
-from testcontainers.postgres import PostgresContainer
+from testcontainers.postgres import (  # pyright: ignore[reportMissingTypeStubs]
+    PostgresContainer,
+)
 
 from iron_sql.codegen import generate_sql_module
 from iron_sql.runtime import ConnectionPool
@@ -247,7 +250,8 @@ async def test_project(
     pg_test_dsn: str,
     schema_path: Path,
 ) -> AsyncGenerator[ProjectBuilder]:
-    clean_name = request.node.name.replace("[", "_").replace("]", "_").replace("-", "_")
+    node_name = cast(str, cast(Any, request.node).name)
+    clean_name = node_name.replace("[", "_").replace("]", "_").replace("-", "_")
     builder = ProjectBuilder(tmp_path, pg_test_dsn, clean_name, schema_path)
 
     # Snapshot state before test
