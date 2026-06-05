@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from enum import StrEnum
 from unittest.mock import AsyncMock
 
 import pytest
@@ -9,6 +10,7 @@ from iron_sql.runtime import ConnectionPool
 from iron_sql.runtime import TooManyRowsError
 from iron_sql.runtime import get_one_row_or_none
 from iron_sql.runtime import json_validated
+from iron_sql.runtime import typed_array_row
 from iron_sql.runtime import typed_scalar_row
 from tests.json_models import UserMetadata
 
@@ -147,3 +149,39 @@ async def test_typed_scalar_row_type_mismatch(pool: ConnectionPool) -> None:
         await cur.execute("SELECT 'not an int'::text")
         with pytest.raises(TypeError, match="Expected scalar of type <class 'int'>"):
             await cur.fetchone()
+
+
+async def test_typed_scalar_row_int_array(pool: ConnectionPool) -> None:
+    async with (
+        pool.connection() as conn,
+        conn.cursor(row_factory=typed_array_row(int, not_null=True)) as cur,
+    ):
+        await cur.execute("SELECT ARRAY[1, 2, 3]::int[]")
+        row = await cur.fetchone()
+        assert row == [1, 2, 3]
+
+
+async def test_typed_scalar_row_array_type_mismatch(pool: ConnectionPool) -> None:
+    async with (
+        pool.connection() as conn,
+        conn.cursor(row_factory=typed_array_row(str, not_null=True)) as cur,
+    ):
+        await cur.execute("SELECT 1::int")
+        with pytest.raises(TypeError, match="Expected scalar of type"):
+            await cur.fetchone()
+
+
+async def test_typed_scalar_row_enum_array(pool: ConnectionPool) -> None:
+    class Status(StrEnum):
+        ACTIVE = "active"
+        INACTIVE = "inactive"
+
+    async with (
+        pool.connection() as conn,
+        conn.cursor(row_factory=typed_array_row(Status, not_null=True)) as cur,
+    ):
+        await cur.execute("SELECT ARRAY['active', 'inactive']::text[]")
+        row = await cur.fetchone()
+        assert row is not None
+        assert row == [Status.ACTIVE, Status.INACTIVE]
+        assert all(isinstance(v, Status) for v in row)

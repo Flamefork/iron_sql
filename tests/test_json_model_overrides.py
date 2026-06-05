@@ -87,6 +87,27 @@ async def test_text_override_read_write(test_project: ProjectBuilder) -> None:
     assert row.data == data
 
 
+async def test_varchar_override_read_write(test_project: ProjectBuilder) -> None:
+    await test_project.extend_schema("""
+        CREATE TABLE varchar_json (
+            id SERIAL PRIMARY KEY,
+            data VARCHAR NOT NULL
+        );
+    """)
+
+    insert_sql = "INSERT INTO varchar_json (data) VALUES ($1) RETURNING id, data"
+    test_project.add_query("ins", insert_sql)
+
+    mod = test_project.generate(
+        json_model_overrides={"varchar_json.data": "tests.json_models:UserMetadata"},
+    )
+
+    data = UserMetadata(key="mode", value="compact")
+    row = await mod.testdb_sql(insert_sql).query_single_row(data)
+    assert isinstance(row.data, UserMetadata)
+    assert row.data == data
+
+
 async def test_nullable_jsonb_override(test_project: ProjectBuilder) -> None:
     select_sql = "SELECT * FROM users WHERE id = $1"
     insert_sql = "INSERT INTO users (id, username, metadata) VALUES ($1, $2, $3)"

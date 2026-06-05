@@ -133,7 +133,7 @@ class Query_67ac0768d48a654b1a305124c92372e8(Query[None]):
     _row_factory = staticmethod(psycopg.rows.scalar_row)
 
     async def execute(self, *, id: uuid.UUID, name: str, owner_id: uuid.UUID, settings: example.models.ProjectSettings) -> None:
-        async with self._client_cursor((id, name, owner_id, runtime.serialize_json_param(example.models.ProjectSettings, settings, 'jsonb'))):
+        async with self._client_cursor((id, name, owner_id, psycopg.types.json.Jsonb(runtime.dump_json_value(example.models.ProjectSettings, settings)))):
             pass
 
 
@@ -143,7 +143,7 @@ class Query_bd4c62c78a942bfd1f087f87a19f2743(Query[None]):
     _row_factory = staticmethod(psycopg.rows.scalar_row)
 
     async def execute(self, *, id: uuid.UUID, project_id: uuid.UUID, title: str, priority: MydbTaskPriority, assignee_id: uuid.UUID | None, metadata: example.models.TaskMetadata | None, due_date: datetime.date | None) -> None:
-        async with self._client_cursor((id, project_id, title, priority, assignee_id, runtime.serialize_json_param(example.models.TaskMetadata, metadata, 'jsonb'), due_date)):
+        async with self._client_cursor((id, project_id, title, priority, assignee_id, psycopg.types.json.Jsonb(runtime.dump_json_value(example.models.TaskMetadata, metadata)) if metadata is not None else None, due_date)):
             pass
 
 

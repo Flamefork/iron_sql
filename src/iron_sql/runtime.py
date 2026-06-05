@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import functools
 import itertools
 import types
 from collections.abc import AsyncGenerator
@@ -14,24 +15,21 @@ from typing import ClassVar
 from typing import Literal
 from typing import Self
 from typing import TypedDict
+from typing import TypeGuard
 from typing import overload
 
 import psycopg
 import psycopg.abc
 import psycopg.rows
 import psycopg.sql
-import psycopg.types.json
 import psycopg_pool
 from psycopg._cursor_base import BaseCursor
 from pydantic import TypeAdapter
 
-_adapter_cache: dict[object, TypeAdapter[object]] = {}
 
-
-def get_adapter(typ: object) -> TypeAdapter[object]:
-    if typ not in _adapter_cache:
-        _adapter_cache[typ] = TypeAdapter(typ)
-    return _adapter_cache[typ]
+@functools.cache
+def get_adapter(typ: object) -> TypeAdapter[Any]:
+    return TypeAdapter(typ)
 
 
 class NoRowsError(Exception):
@@ -44,7 +42,7 @@ class TooManyRowsError(Exception):
 
 @asynccontextmanager
 async def listen(
-    conn: psycopg.AsyncConnection, channel: str
+    conn: psycopg.AsyncConnection[Any], channel: str
 ) -> AsyncGenerator[AsyncGenerator[str]]:
     _validate_channel(channel)
     if await _has_active_listen_subscriptions(conn):
@@ -66,7 +64,9 @@ async def listen(
             await execute_unlisten(conn, channel)
 
 
-async def notify(conn: psycopg.AsyncConnection, channel: str, payload: str) -> None:
+async def notify(
+    conn: psycopg.AsyncConnection[Any], channel: str, payload: str
+) -> None:
     _validate_channel(channel)
     await conn.execute(
         psycopg.sql.SQL("NOTIFY {}, {}").format(
@@ -76,21 +76,21 @@ async def notify(conn: psycopg.AsyncConnection, channel: str, payload: str) -> N
     )
 
 
-async def execute_listen(conn: psycopg.AsyncConnection, channel: str) -> None:
+async def execute_listen(conn: psycopg.AsyncConnection[Any], channel: str) -> None:
     _validate_channel(channel)
     await conn.execute(
         psycopg.sql.SQL("LISTEN {}").format(psycopg.sql.Identifier(channel))
     )
 
 
-async def execute_unlisten(conn: psycopg.AsyncConnection, channel: str) -> None:
+async def execute_unlisten(conn: psycopg.AsyncConnection[Any], channel: str) -> None:
     _validate_channel(channel)
     await conn.execute(
         psycopg.sql.SQL("UNLISTEN {}").format(psycopg.sql.Identifier(channel))
     )
 
 
-async def _has_active_listen_subscriptions(conn: psycopg.AsyncConnection) -> bool:
+async def _has_active_listen_subscriptions(conn: psycopg.AsyncConnection[Any]) -> bool:
     async with conn.cursor() as cur:
         await cur.execute("SELECT EXISTS (SELECT FROM pg_listening_channels())")
         row = await cur.fetchone()
@@ -114,7 +114,9 @@ def _next_cursor_name() -> str:
 
 
 @asynccontextmanager
-async def _ensure_transaction(conn: psycopg.AsyncConnection) -> AsyncGenerator[None]:
+async def _ensure_transaction(
+    conn: psycopg.AsyncConnection[Any],
+) -> AsyncGenerator[None]:
     match conn.info.transaction_status:
         case psycopg.pq.TransactionStatus.IDLE:
             async with conn.transaction():
@@ -130,10 +132,10 @@ class Query[T]:
     _stmt: ClassVar[psycopg.sql.SQL]
     _row_factory: psycopg.rows.BaseRowFactory[T]
     _connection_factory: Callable[
-        [], contextlib.AbstractAsyncContextManager[psycopg.AsyncConnection]
+        [], contextlib.AbstractAsyncContextManager[psycopg.AsyncConnection[Any]]
     ]
 
-    def with_connection(self, connection: psycopg.AsyncConnection) -> Self:
+    def with_connection(self, connection: psycopg.AsyncConnection[Any]) -> Self:
         q = self.__class__()
         q._connection_factory = lambda: contextlib.nullcontext(connection)  # noqa: SLF001
         return q
@@ -218,7 +220,7 @@ class ConnectionPool:
         await self.psycopg_pool.check()
 
     @asynccontextmanager
-    async def connection(self) -> AsyncGenerator[psycopg.AsyncConnection]:
+    async def connection(self) -> AsyncGenerator[psycopg.AsyncConnection[Any]]:
         task = asyncio.current_task()
         cancelling_before = 0 if task is None else task.cancelling()
         await self.psycopg_pool.open()
@@ -250,8 +252,8 @@ class ConnectionPool:
 
     @asynccontextmanager
     async def connection_in_context(
-        self, context_var: ContextVar[psycopg.AsyncConnection | None]
-    ) -> AsyncGenerator[psycopg.AsyncConnection]:
+        self, context_var: ContextVar[psycopg.AsyncConnection[Any] | None]
+    ) -> AsyncGenerator[psycopg.AsyncConnection[Any]]:
         conn = context_var.get()
         if conn is not None:
             yield conn
@@ -264,42 +266,40 @@ class ConnectionPool:
                 context_var.reset(token)
 
 
-def validate_json_field(typ: object, value: object) -> object:
-    if value is None:
-        return None
+def validate_json_field[T](typ: type[T], value: object) -> T:
     adapter = get_adapter(typ)
     if isinstance(value, str | bytes):
         return adapter.validate_json(value)
     return adapter.validate_python(value)
 
 
-def json_validated(**json_fields: object):
-    def decorator[T](cls: type[T]) -> type[T]:
-        original = getattr(cls, "__post_init__", None)
+def json_validated[T](**json_fields: object) -> Callable[[type[T]], type[T]]:
+    def decorator(cls: type[T]) -> type[T]:
+        original_post_init = getattr(cls, "__post_init__", None)
 
         def __post_init__(self: object) -> None:  # noqa: N807
-            if original is not None:
-                original(self)
+            if original_post_init is not None:
+                original_post_init(self)
             for name, typ in json_fields.items():
-                setattr(self, name, validate_json_field(typ, getattr(self, name)))
+                current = getattr(self, name)
+                if current is None:
+                    continue
+                setattr(self, name, validate_json_field(typ, current))  # pyright: ignore[reportArgumentType]
 
-        cls.__post_init__ = __post_init__  # type: ignore[attr-defined]
+        setattr(cls, "__post_init__", __post_init__)  # noqa: B010
         return cls
 
     return decorator
 
 
-def serialize_json_param(typ: object, value: object, db_type: str) -> object:
-    if value is None:
-        return None
+def dump_json_value(typ: object, value: object) -> object:
     adapter = get_adapter(typ)
-    match db_type:
-        case "json":
-            return psycopg.types.json.Json(adapter.dump_python(value, mode="json"))
-        case "jsonb":
-            return psycopg.types.json.Jsonb(adapter.dump_python(value, mode="json"))
-        case _:
-            return adapter.dump_json(value).decode()
+    return adapter.dump_python(value, mode="json")
+
+
+def dump_json_text(typ: object, value: object) -> str:
+    adapter = get_adapter(typ)
+    return adapter.dump_json(value).decode()
 
 
 def get_one_row[T](rows: list[T]) -> T:
@@ -353,13 +353,100 @@ def typed_scalar_row[T](
                 return None
             if validate:
                 return validate(val)
-            if not isinstance(val, typ):
-                if issubclass(typ, Enum):
-                    return typ(val)
-                msg = f"Expected scalar of type {typ}, got {type(val)}"
-                raise TypeError(msg)
-            return val
+            return _coerce_scalar_type(val, typ)
 
         return typed_scalar_row__
 
     return typed_scalar_row_
+
+
+@overload
+def typed_value_row[T](
+    *,
+    not_null: Literal[True],
+) -> psycopg.rows.BaseRowFactory[T]: ...
+
+
+@overload
+def typed_value_row[T](
+    *,
+    not_null: Literal[False],
+) -> psycopg.rows.BaseRowFactory[T | None]: ...
+
+
+def typed_value_row[T](*, not_null: bool) -> psycopg.rows.BaseRowFactory[T | None]:
+    def typed_value_row_(
+        cursor: BaseCursor[Any, Any],
+    ) -> psycopg.rows.RowMaker[T | None]:
+        scalar_row_ = psycopg.rows.scalar_row(cursor)
+
+        def typed_value_row__(values: Sequence[Any]) -> T | None:
+            val = scalar_row_(values)
+            if val is None:
+                if not_null:
+                    msg = "Expected non-null value, got None"
+                    raise TypeError(msg)
+                return None
+            return val
+
+        return typed_value_row__
+
+    return typed_value_row_
+
+
+@overload
+def typed_array_row[T](
+    elem_typ: type[T],
+    *,
+    not_null: Literal[True],
+) -> psycopg.rows.BaseRowFactory[list[T]]: ...
+
+
+@overload
+def typed_array_row[T](
+    elem_typ: type[T],
+    *,
+    not_null: Literal[False],
+) -> psycopg.rows.BaseRowFactory[list[T] | None]: ...
+
+
+def typed_array_row[T](
+    elem_typ: type[T], *, not_null: bool
+) -> psycopg.rows.BaseRowFactory[list[T] | None]:
+    def typed_array_row_(
+        cursor: BaseCursor[Any, Any],
+    ) -> psycopg.rows.RowMaker[list[T] | None]:
+        scalar_row_ = psycopg.rows.scalar_row(cursor)
+
+        def typed_array_row__(values: Sequence[Any]) -> list[T] | None:
+            val = scalar_row_(values)
+            if val is None:
+                if not_null:
+                    msg = "Expected non-null value, got None"
+                    raise TypeError(msg)
+                return None
+            if not _is_object_list(val):
+                msg = f"Expected scalar of type list[{elem_typ}], got {type(val)}"
+                raise TypeError(msg)
+            return [_coerce_scalar_type(v, elem_typ) for v in val]
+
+        return typed_array_row__
+
+    return typed_array_row_
+
+
+def _coerce_scalar_type[T](val: object, typ: type[T]) -> T:
+    if issubclass(typ, Enum):
+        val = typ(val)
+    if _is_instance(val, typ):
+        return val
+    msg = f"Expected scalar of type {typ}, got {type(val)}"
+    raise TypeError(msg)
+
+
+def _is_instance[T](val: object, typ: type[T]) -> TypeGuard[T]:
+    return isinstance(val, typ)
+
+
+def _is_object_list(val: object) -> TypeGuard[list[object]]:
+    return isinstance(val, list)

@@ -3,7 +3,6 @@ import ipaddress
 import warnings
 from enum import StrEnum
 from typing import Any
-from typing import cast
 from typing import get_args
 
 import pytest
@@ -13,7 +12,7 @@ from tests.conftest import ProjectBuilder
 
 
 def assert_return_types(query: Any, expected: set[type]) -> None:
-    ret = cast(Any, type(query)).query_single_row.__annotations__["return"]
+    ret = type(query).query_single_row.__annotations__["return"]  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
     ret_args = get_args(ret)
     actual: set[Any] = (
         {a for a in ret_args if a is not type(None)} if ret_args else {ret}
@@ -84,6 +83,45 @@ async def test_entity_generation_with_enum(test_project: ProjectBuilder) -> None
     seq_type = next(a for a in tag_args if a is not type(None))
     (inner_type,) = get_args(seq_type)
     assert inner_type is enum_cls
+
+
+async def test_single_array_column_result_roundtrip(
+    test_project: ProjectBuilder,
+) -> None:
+    await test_project.extend_schema("""
+    CREATE TABLE array_results (
+        id SERIAL PRIMARY KEY,
+        scores int[] NOT NULL,
+        extra int[]
+    );
+    """)
+
+    not_null_sql = "SELECT scores FROM array_results WHERE id = $1"
+    nullable_sql = "SELECT extra FROM array_results WHERE id = $1"
+    test_project.add_query("get_scores", not_null_sql)
+    test_project.add_query("get_extra", nullable_sql)
+
+    mod = test_project.generate()
+
+    generated = (
+        test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
+    ).read_text()
+    assert "runtime.typed_array_row(int, not_null=True)" in generated
+    assert "runtime.typed_array_row(int, not_null=False)" in generated
+
+    async with mod.testdb_connection() as conn:
+        await conn.execute(
+            "INSERT INTO array_results (id, scores, extra) VALUES (%s, %s, %s)",
+            (1, [1, 2, 3], None),
+        )
+        await conn.execute(
+            "INSERT INTO array_results (id, scores, extra) VALUES (%s, %s, %s)",
+            (2, [4], [5, 6]),
+        )
+
+    assert await mod.testdb_sql(not_null_sql).query_single_row(1) == [1, 2, 3]
+    assert await mod.testdb_sql(nullable_sql).query_single_row(1) is None
+    assert await mod.testdb_sql(nullable_sql).query_single_row(2) == [5, 6]
 
 
 async def test_unused_enum_skipped(test_project: ProjectBuilder) -> None:

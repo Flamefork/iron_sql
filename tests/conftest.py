@@ -8,7 +8,6 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from typing import LiteralString
-from typing import cast
 
 import psycopg
 import pytest
@@ -143,7 +142,7 @@ class ProjectBuilder:
         dsn: str,
         test_name: str,
         schema_path: Path,
-    ):
+    ) -> None:
         self.root = root
         self.dsn = dsn
         self.test_name = test_name
@@ -250,7 +249,7 @@ async def test_project(
     pg_test_dsn: str,
     schema_path: Path,
 ) -> AsyncGenerator[ProjectBuilder]:
-    node_name = cast(str, cast(Any, request.node).name)
+    node_name = str(request.node.name)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
     clean_name = node_name.replace("[", "_").replace("]", "_").replace("-", "_")
     builder = ProjectBuilder(tmp_path, pg_test_dsn, clean_name, schema_path)
 

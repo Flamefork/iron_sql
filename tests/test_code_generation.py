@@ -9,8 +9,16 @@ import pytest
 
 from iron_sql.codegen import generate_sql_module
 from iron_sql.codegen.generator import ModuleExprRef
+from iron_sql.codegen.generator import ParamSpec
 from iron_sql.codegen.sqlc import run_sqlc
 from tests.conftest import ProjectBuilder
+
+_USER_METADATA_TYPE = "tests.json_models.UserMetadata"
+_JSON_METADATA_EXPR = f"runtime.dump_json_value({_USER_METADATA_TYPE}, metadata)"
+_TEXT_METADATA_EXPR = f"runtime.dump_json_text({_USER_METADATA_TYPE}, metadata)"
+_NULLABLE_JSONB_METADATA_EXPR = (
+    f"psycopg.types.json.Jsonb({_JSON_METADATA_EXPR}) if metadata is not None else None"
+)
 
 
 def test_source_location_comments(test_project: ProjectBuilder) -> None:
@@ -168,6 +176,53 @@ def test_json_param_generates_successfully(test_project: ProjectBuilder) -> None
         "insert_json", "INSERT INTO json_payloads (payload) VALUES ($1)"
     )
     assert test_project.generate_no_import() is True
+
+
+@pytest.mark.parametrize(
+    ("db_type", "expected"),
+    [
+        (
+            "json",
+            f"psycopg.types.json.Json({_JSON_METADATA_EXPR})",
+        ),
+        (
+            "jsonb",
+            f"psycopg.types.json.Jsonb({_JSON_METADATA_EXPR})",
+        ),
+        ("text", _TEXT_METADATA_EXPR),
+        ("varchar", _TEXT_METADATA_EXPR),
+    ],
+)
+def test_json_model_param_serialized_expr_uses_direct_db_type_mapping(
+    db_type: str, expected: str
+) -> None:
+    assert (
+        ParamSpec(
+            name="metadata",
+            py_type=_USER_METADATA_TYPE,
+            is_named=False,
+            db_type=db_type,
+            not_null=True,
+            is_array=False,
+            json_type=_USER_METADATA_TYPE,
+        ).serialized_expr
+        == expected
+    )
+
+
+def test_nullable_json_model_param_serialized_expr_keeps_none() -> None:
+    assert (
+        ParamSpec(
+            name="metadata",
+            py_type="tests.json_models.UserMetadata | None",
+            is_named=False,
+            db_type="jsonb",
+            not_null=False,
+            is_array=False,
+            json_type=_USER_METADATA_TYPE,
+        ).serialized_expr
+        == _NULLABLE_JSONB_METADATA_EXPR
+    )
 
 
 def test_unsupported_param_types_array(test_project: ProjectBuilder) -> None:

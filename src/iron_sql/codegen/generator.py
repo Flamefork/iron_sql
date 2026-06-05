@@ -31,6 +31,7 @@ class ColumnSpec:
     name: str
     table: str
     py_type: str
+    element_py_type: str | None = None
     json_type: str | None = None
 
 
@@ -51,19 +52,30 @@ class ParamSpec:
 
     @property
     def serialized_expr(self) -> str:
+        expr = self.name
+        wraps_value = False
         if self.json_type:
-            return f"runtime.serialize_json_param({self.json_type}, {self.name}, {self.db_type!r})"  # noqa: E501
-
+            match self.db_type:
+                case "json" | "jsonb":
+                    expr = f"runtime.dump_json_value({self.json_type}, {self.name})"
+                    wraps_value = True
+                case "text" | "varchar":
+                    expr = f"runtime.dump_json_text({self.json_type}, {self.name})"
+                    wraps_value = True
+                case _:
+                    msg = f"Unsupported JSON parameter type: {self.db_type}"
+                    raise TypeError(msg)
         match self.db_type:
             case "json":
-                expr = f"psycopg.types.json.Json({self.name})"
+                expr = f"psycopg.types.json.Json({expr})"
+                wraps_value = True
             case "jsonb":
-                expr = f"psycopg.types.json.Jsonb({self.name})"
+                expr = f"psycopg.types.json.Jsonb({expr})"
+                wraps_value = True
             case _:
-                return self.name
-
-        if not self.not_null:
-            return f"{expr} if {self.name} is not None else None"
+                pass
+        if wraps_value and not self.not_null:
+            expr = f"{expr} if {self.name} is not None else None"
         return expr
 
 
@@ -159,16 +171,17 @@ class TypeResolver:
     json_column_type_overrides: dict[tuple[str, str], str]
 
     def column_spec(self, column: Column) -> ColumnSpec:
-        _, py_type, json_type = self._resolve(column)
+        _, py_type, element_py_type, json_type = self._resolve(column)
         return ColumnSpec(
             name=column.name,
             table=column.table.name if column.table else "unknown",
             py_type=py_type,
+            element_py_type=element_py_type,
             json_type=json_type,
         )
 
     def param_spec(self, column: Column, name: str, *, is_named: bool) -> ParamSpec:
-        db_type, py_type, json_type = self._resolve(column)
+        db_type, py_type, _, json_type = self._resolve(column)
         return ParamSpec(
             name=name,
             py_type=py_type,
@@ -179,7 +192,7 @@ class TypeResolver:
             json_type=json_type,
         )
 
-    def _resolve(self, column: Column) -> tuple[str, str, str | None]:
+    def _resolve(self, column: Column) -> tuple[str, str, str | None, str | None]:
         db_type = column.type.name.removeprefix("pg_catalog.")
 
         json_type = None
@@ -210,13 +223,15 @@ class TypeResolver:
             )
             py_type = "object"
 
+        element_py_type = None
         if column.is_array:
+            element_py_type = py_type
             py_type = f"Sequence[{py_type}]"
 
         if not column.not_null:
             py_type += " | None"
 
-        return db_type, py_type, json_type
+        return db_type, py_type, element_py_type, json_type
 
 
 def collect_used_enums(sqlc_res: SQLCResult) -> set[tuple[str, str]]:
@@ -390,12 +405,7 @@ def render_query_classes(
                 for p in q.params
             ],
             query_result_types[q.name],
-            len(q.columns),
-            (
-                resolver.column_spec(q.columns[0]).json_type
-                if len(q.columns) == 1
-                else None
-            ),
+            tuple(resolver.column_spec(column) for column in q.columns),
             query_locations_by_name[q.name],
         )
         for q in sorted(sqlc_queries, key=lambda q: query_order[q.name])
@@ -658,8 +668,7 @@ def render_query_class(
     sql: str,
     query_params: list[ParamSpec],
     result: str,
-    columns_num: int,
-    scalar_json_type: str | None,
+    result_columns: tuple[ColumnSpec, ...],
     locations: list[str],
 ) -> str:
     query_params = deduplicate_params(query_params)
@@ -681,24 +690,9 @@ def render_query_class(
     query_fn_params.insert(0, "self")
 
     base_result = result.removesuffix(" | None")
+    row_factory = render_row_factory(result, result_columns)
 
-    if columns_num == 0:
-        row_factory = "psycopg.rows.scalar_row"
-    elif columns_num == 1:
-        not_null_str = "True" if not result.endswith(" | None") else "False"
-        validate_arg = (
-            f", validate=lambda _v: runtime.validate_json_field({scalar_json_type}, _v)"
-            if scalar_json_type
-            else ""
-        )
-        row_factory = (
-            f"runtime.typed_scalar_row"
-            f"({base_result}, not_null={not_null_str}{validate_arg})"
-        )
-    else:
-        row_factory = f"psycopg.rows.class_row({result})"
-
-    if columns_num > 0:
+    if result_columns:
         methods = f"""
 
 async def query_all_rows({", ".join(query_fn_params)}) -> list[{result}]:
@@ -736,6 +730,34 @@ class {query_name}(Query[{result}]):
     {indent_block(methods, "    ")}
 
     """.strip()
+
+
+def render_row_factory(result: str, columns: tuple[ColumnSpec, ...]) -> str:
+    match columns:
+        case ():
+            return "psycopg.rows.scalar_row"
+        case (column,):
+            return render_scalar_row_factory(result, column)
+        case _:
+            return f"psycopg.rows.class_row({result})"
+
+
+def render_scalar_row_factory(result: str, column: ColumnSpec) -> str:
+    base_result = result.removesuffix(" | None")
+    not_null = "True" if not result.endswith(" | None") else "False"
+
+    if column.element_py_type is not None:
+        return f"runtime.typed_array_row({column.element_py_type}, not_null={not_null})"
+
+    validate_arg = (
+        f", validate=lambda _v: runtime.validate_json_field({column.json_type}, _v)"
+        if column.json_type
+        else ""
+    )
+    if " | " in base_result and not validate_arg:
+        return f"runtime.typed_value_row(not_null={not_null})"
+
+    return f"runtime.typed_scalar_row({base_result}, not_null={not_null}{validate_arg})"
 
 
 def render_query_overload(
