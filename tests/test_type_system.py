@@ -8,6 +8,7 @@ from typing import get_args
 import pytest
 
 from iron_sql.codegen import UnknownSQLTypeWarning
+from iron_sql.runtime import ConnectionPool
 from tests.conftest import ProjectBuilder
 
 
@@ -124,6 +125,214 @@ async def test_single_array_column_result_roundtrip(
     assert await mod.testdb_sql(nullable_sql).query_single_row(2) == [5, 6]
 
 
+async def test_enum_resolves_to_instances_in_all_result_positions(
+    test_project: ProjectBuilder,
+) -> None:
+    await test_project.extend_schema("""
+    CREATE TABLE enum_results (
+        id SERIAL PRIMARY KEY,
+        status user_status NOT NULL,
+        tags user_status[] NOT NULL
+    );
+    """)
+
+    multi_sql = "SELECT id, status, tags FROM enum_results WHERE id = $1"
+    scalar_sql = "SELECT status FROM enum_results WHERE id = $1"
+    array_sql = "SELECT tags FROM enum_results WHERE id = $1"
+    test_project.add_query("get_row", multi_sql)
+    test_project.add_query("get_status", scalar_sql)
+    test_project.add_query("get_tags", array_sql)
+
+    mod = test_project.generate()
+    status_enum = mod.TestdbUserStatus
+
+    async with mod.testdb_connection() as conn:
+        await conn.execute(
+            "INSERT INTO enum_results (id, status, tags) VALUES (%s, %s, %s)",
+            (1, status_enum.ACTIVE, [status_enum.ACTIVE, status_enum.INACTIVE]),
+        )
+
+    row = await mod.testdb_sql(multi_sql).query_single_row(1)
+    assert row.status is status_enum.ACTIVE
+    assert row.tags == [status_enum.ACTIVE, status_enum.INACTIVE]
+    assert all(isinstance(tag, status_enum) for tag in row.tags)
+
+    assert await mod.testdb_sql(scalar_sql).query_single_row(1) is status_enum.ACTIVE
+
+    tags = await mod.testdb_sql(array_sql).query_single_row(1)
+    assert tags == [status_enum.ACTIVE, status_enum.INACTIVE]
+    assert all(isinstance(tag, status_enum) for tag in tags)
+
+
+async def test_nullable_enum_resolves_or_returns_none(
+    test_project: ProjectBuilder,
+) -> None:
+    await test_project.extend_schema("""
+    CREATE TABLE nullable_enum (
+        id SERIAL PRIMARY KEY,
+        status user_status,
+        tags user_status[]
+    );
+    """)
+
+    scalar_sql = "SELECT status FROM nullable_enum WHERE id = $1"
+    array_sql = "SELECT tags FROM nullable_enum WHERE id = $1"
+    test_project.add_query("get_status", scalar_sql)
+    test_project.add_query("get_tags", array_sql)
+
+    mod = test_project.generate()
+    status_enum = mod.TestdbUserStatus
+
+    async with mod.testdb_connection() as conn:
+        await conn.execute(
+            "INSERT INTO nullable_enum (id, status, tags) VALUES (%s, %s, %s)",
+            (1, None, None),
+        )
+        await conn.execute(
+            "INSERT INTO nullable_enum (id, status, tags) VALUES (%s, %s, %s)",
+            (2, status_enum.ACTIVE, [status_enum.INACTIVE]),
+        )
+
+    assert await mod.testdb_sql(scalar_sql).query_single_row(1) is None
+    assert await mod.testdb_sql(scalar_sql).query_single_row(2) is status_enum.ACTIVE
+    assert await mod.testdb_sql(array_sql).query_single_row(1) is None
+    assert await mod.testdb_sql(array_sql).query_single_row(2) == [status_enum.INACTIVE]
+
+
+async def test_normalized_enum_label_roundtrips(test_project: ProjectBuilder) -> None:
+    await test_project.extend_schema("""
+    CREATE TYPE task_phase AS ENUM ('in-progress', '2fa');
+    CREATE TABLE phase_table (
+        id SERIAL PRIMARY KEY,
+        phase task_phase NOT NULL
+    );
+    """)
+
+    select_sql = "SELECT phase FROM phase_table WHERE id = $1"
+    test_project.add_query("get_phase", select_sql)
+
+    mod = test_project.generate()
+    phase_enum = mod.TestdbTaskPhase
+
+    # Member names are normalized, but values keep the raw PostgreSQL labels —
+    # so registration must map by value, not by member name.
+    assert phase_enum.IN_PROGRESS == "in-progress"
+    assert phase_enum.NUM2FA == "2fa"
+
+    async with mod.testdb_connection() as conn:
+        await conn.execute(
+            "INSERT INTO phase_table (id, phase) VALUES (%s, %s)",
+            (1, phase_enum.IN_PROGRESS),
+        )
+
+    assert (
+        await mod.testdb_sql(select_sql).query_single_row(1) is phase_enum.IN_PROGRESS
+    )
+
+
+async def test_empty_enum_array_returns_empty_list(
+    test_project: ProjectBuilder,
+) -> None:
+    await test_project.extend_schema("""
+    CREATE TABLE empty_enum_array (
+        id SERIAL PRIMARY KEY,
+        tags user_status[] NOT NULL
+    );
+    """)
+
+    select_sql = "SELECT tags FROM empty_enum_array WHERE id = $1"
+    test_project.add_query("get_tags", select_sql)
+
+    mod = test_project.generate()
+
+    async with mod.testdb_connection() as conn:
+        await conn.execute(
+            "INSERT INTO empty_enum_array (id, tags) VALUES (1, '{}'::user_status[])"
+        )
+
+    assert await mod.testdb_sql(select_sql).query_single_row(1) == []
+
+
+async def test_distinct_enums_register_independently(
+    test_project: ProjectBuilder,
+) -> None:
+    await test_project.extend_schema("""
+    CREATE TYPE color AS ENUM ('red', 'green');
+    CREATE TABLE multi_enum (
+        id SERIAL PRIMARY KEY,
+        status user_status NOT NULL,
+        color color NOT NULL
+    );
+    """)
+
+    select_sql = "SELECT status, color FROM multi_enum WHERE id = $1"
+    test_project.add_query("get_multi", select_sql)
+
+    mod = test_project.generate()
+    status_enum = mod.TestdbUserStatus
+    color_enum = mod.TestdbColor
+
+    async with mod.testdb_connection() as conn:
+        await conn.execute(
+            "INSERT INTO multi_enum (id, status, color) VALUES (%s, %s, %s)",
+            (1, status_enum.ACTIVE, color_enum.RED),
+        )
+
+    row = await mod.testdb_sql(select_sql).query_single_row(1)
+    assert row.status is status_enum.ACTIVE
+    assert row.color is color_enum.RED
+
+
+async def test_scalar_enum_query_requires_registered_connection(
+    test_project: ProjectBuilder,
+) -> None:
+    select_sql = "SELECT 'active'::user_status AS status"
+    test_project.add_query("get_status", select_sql)
+
+    mod = test_project.generate()
+
+    # A pool without enum_types — its connections are not enum-aware.
+    unregistered_pool = ConnectionPool(test_project.dsn)
+    try:
+        async with unregistered_pool.connection() as conn:
+            query = mod.testdb_sql(select_sql).with_connection(conn)
+            with pytest.raises(TypeError, match="Expected scalar of type"):
+                await query.query_single_row()
+    finally:
+        await unregistered_pool.close()
+
+
+async def test_nullable_union_scalar_returns_none(
+    test_project: ProjectBuilder,
+) -> None:
+    await test_project.extend_schema("""
+    CREATE TABLE network (
+        id SERIAL PRIMARY KEY,
+        addr inet
+    );
+    """)
+
+    select_sql = "SELECT addr FROM network WHERE id = $1"
+    test_project.add_query("get_addr", select_sql)
+
+    mod = test_project.generate()
+
+    generated = (
+        test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
+    ).read_text()
+    assert "runtime.typed_value_row(not_null=False)" in generated
+
+    async with mod.testdb_connection() as conn:
+        await conn.execute(
+            "INSERT INTO network (id, addr) VALUES (1, NULL), (2, '10.0.0.1')"
+        )
+
+    assert await mod.testdb_sql(select_sql).query_single_row(1) is None
+    assert await mod.testdb_sql(select_sql).query_single_row(2) == ipaddress.ip_address(
+        "10.0.0.1"
+    )
+
+
 async def test_unused_enum_skipped(test_project: ProjectBuilder) -> None:
     extra_schema = """
     CREATE TYPE unused_enum AS ENUM ('a', 'b');
@@ -204,7 +413,8 @@ async def test_cross_schema_enum_type_annotation(
 
     await test_project.extend_schema(extra_schema)
 
-    test_project.add_query("get_cross_enum", "SELECT * FROM cross_schema_enum_table")
+    select_sql = "SELECT * FROM cross_schema_enum_table"
+    test_project.add_query("get_cross_enum", select_sql)
 
     mod = test_project.generate()
 
@@ -212,6 +422,17 @@ async def test_cross_schema_enum_type_annotation(
     entity_cls = mod.TestdbCrossSchemaEnumTable
 
     assert entity_cls.__annotations__["mood"] is enum_cls
+
+    # The enum lives in a non-public schema, so its type is registered by its
+    # schema-qualified name.
+    async with mod.testdb_connection() as conn:
+        await conn.execute(
+            "INSERT INTO cross_schema_enum_table (mood) VALUES (%s)",
+            (enum_cls.HAPPY,),
+        )
+
+    row = await mod.testdb_sql(select_sql).query_single_row()
+    assert row.mood is enum_cls.HAPPY
 
 
 async def test_pg_catalog_type_does_not_break_generation(

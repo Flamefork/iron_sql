@@ -32,11 +32,32 @@ from example.config import POOL_OPTIONS
 import example.models
 
 
+class MydbTaskPriority(StrEnum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class MydbTaskStatus(StrEnum):
+    OPEN = "open"
+    IN_PROGRESS = "in_progress"
+    DONE = "done"
+    CANCELLED = "cancelled"
+
+
+ENUM_TYPES: list[tuple[str, type[StrEnum]]] = [
+    ("public.task_priority", MydbTaskPriority),
+    ("public.task_status", MydbTaskStatus),
+]
+
+
 MYDB_POOL = runtime.ConnectionPool(
     DSN,
     name="mydb",
     application_name=None,
     pool_options=POOL_OPTIONS,
+    enum_types=ENUM_TYPES,
 )
 
 _mydb_connection = ContextVar[psycopg.AsyncConnection | None](
@@ -69,20 +90,6 @@ async def mydb_listen_session(
 async def mydb_notify(channel: str, payload: str = "") -> None:
     async with mydb_connection() as conn:
         await runtime.notify(conn, channel, payload)
-
-
-class MydbTaskPriority(StrEnum):
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
-
-
-class MydbTaskStatus(StrEnum):
-    OPEN = "open"
-    IN_PROGRESS = "in_progress"
-    DONE = "done"
-    CANCELLED = "cancelled"
 
 
 @dataclass(kw_only=True)

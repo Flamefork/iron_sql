@@ -9,7 +9,7 @@ from collections.abc import Callable
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 from typing import ClassVar
 from typing import Literal
@@ -22,6 +22,7 @@ import psycopg
 import psycopg.abc
 import psycopg.rows
 import psycopg.sql
+import psycopg.types.enum
 import psycopg_pool
 from psycopg._cursor_base import BaseCursor
 from pydantic import TypeAdapter
@@ -182,6 +183,35 @@ class PoolOptions(TypedDict, total=False):
     reconnect_failed: Callable[[psycopg_pool.AsyncConnectionPool[Any]], Awaitable[None]]
 
 
+async def register_enums(
+    conn: psycopg.AsyncConnection[Any],
+    enum_types: Sequence[tuple[str, type[StrEnum]]],
+) -> None:
+    for pg_name, enum_cls in enum_types:
+        info = await psycopg.types.enum.EnumInfo.fetch(conn, pg_name)
+        if info is None:
+            msg = f"Enum type {pg_name!r} not found in database"
+            raise RuntimeError(msg)
+        psycopg.types.enum.register_enum(
+            info,
+            conn,
+            enum_cls,
+            mapping=[(member, member.value) for member in enum_cls],
+        )
+
+
+def _enum_configure(
+    enum_types: Sequence[tuple[str, type[StrEnum]]],
+    user_configure: Callable[[psycopg.AsyncConnection[Any]], Awaitable[None]] | None,
+) -> Callable[[psycopg.AsyncConnection[Any]], Awaitable[None]]:
+    async def configure(conn: psycopg.AsyncConnection[Any]) -> None:
+        await register_enums(conn, enum_types)
+        if user_configure is not None:
+            await user_configure(conn)
+
+    return configure
+
+
 class ConnectionPool:
     def __init__(
         self,
@@ -190,11 +220,13 @@ class ConnectionPool:
         name: str | None = None,
         application_name: str | None = None,
         pool_options: PoolOptions | None = None,
+        enum_types: Sequence[tuple[str, type[StrEnum]]] = (),
     ) -> None:
         self.conninfo = conninfo
         self.name = name
         self.application_name = application_name
         self.pool_options = pool_options or {}
+        self.enum_types = enum_types
         self._init_psycopg_pool()
 
     async def close(self) -> None:
@@ -235,6 +267,10 @@ class ConnectionPool:
         forwarded: dict[str, Any] = {
             k: v for k, v in self.pool_options.items() if k != "kwargs"
         }
+        if self.enum_types:
+            forwarded["configure"] = _enum_configure(
+                self.enum_types, forwarded.get("configure")
+            )
         conn_kwargs = {
             **user_kwargs,
             # https://www.psycopg.org/psycopg3/docs/basic/transactions.html#autocommit-transactions
@@ -353,7 +389,7 @@ def typed_scalar_row[T](
                 return None
             if validate:
                 return validate(val)
-            return _coerce_scalar_type(val, typ)
+            return _check_scalar_type(val, typ)
 
         return typed_scalar_row__
 
@@ -428,16 +464,14 @@ def typed_array_row[T](
             if not _is_object_list(val):
                 msg = f"Expected scalar of type list[{elem_typ}], got {type(val)}"
                 raise TypeError(msg)
-            return [_coerce_scalar_type(v, elem_typ) for v in val]
+            return [_check_scalar_type(v, elem_typ) for v in val]
 
         return typed_array_row__
 
     return typed_array_row_
 
 
-def _coerce_scalar_type[T](val: object, typ: type[T]) -> T:
-    if issubclass(typ, Enum):
-        val = typ(val)
+def _check_scalar_type[T](val: object, typ: type[T]) -> T:
     if _is_instance(val, typ):
         return val
     msg = f"Expected scalar of type {typ}, got {type(val)}"

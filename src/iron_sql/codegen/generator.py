@@ -35,6 +35,14 @@ class ColumnSpec:
     json_type: str | None = None
 
 
+_JSON_PARAM_DUMPERS = {
+    "json": "runtime.dump_json_value",
+    "jsonb": "runtime.dump_json_value",
+    "text": "runtime.dump_json_text",
+    "varchar": "runtime.dump_json_text",
+}
+
+
 @dataclass(kw_only=True, frozen=True)
 class ParamSpec:
     name: str
@@ -55,16 +63,9 @@ class ParamSpec:
         expr = self.name
         wraps_value = False
         if self.json_type:
-            match self.db_type:
-                case "json" | "jsonb":
-                    expr = f"runtime.dump_json_value({self.json_type}, {self.name})"
-                    wraps_value = True
-                case "text" | "varchar":
-                    expr = f"runtime.dump_json_text({self.json_type}, {self.name})"
-                    wraps_value = True
-                case _:
-                    msg = f"Unsupported JSON parameter type: {self.db_type}"
-                    raise TypeError(msg)
+            dump_fn = _JSON_PARAM_DUMPERS[self.db_type]
+            expr = f"{dump_fn}({self.json_type}, {self.name})"
+            wraps_value = True
         match self.db_type:
             case "json":
                 expr = f"psycopg.types.json.Json({expr})"
@@ -331,11 +332,24 @@ def generate_sql_module(  # noqa: PLR0913, PLR0914
 
     used_enums = collect_used_enums(sqlc_res)
 
-    enums = sorted(
-        render_enum_class(e, module_name, to_pascal_fn, to_snake_fn)
+    enum_specs = [
+        (schema, e)
         for schema in sqlc_res.catalog.schemas
         for e in schema.enums
         if (schema.name, e.name) in used_enums
+    ]
+
+    enums = sorted(
+        render_enum_class(e, module_name, to_pascal_fn, to_snake_fn)
+        for _, e in enum_specs
+    )
+
+    enum_registry = sorted(
+        (
+            f"{schema.name}.{e.name}",
+            enum_class_name(e.name, module_name, to_pascal_fn, to_snake_fn),
+        )
+        for schema, e in enum_specs
     )
 
     query_classes = render_query_classes(
@@ -356,6 +370,7 @@ def generate_sql_module(  # noqa: PLR0913, PLR0914
         sql_fn_name,
         entities,
         enums,
+        enum_registry,
         query_classes,
         query_overloads,
         query_dict_entries,
@@ -418,7 +433,7 @@ def resolve_json_model_overrides(
     if not overrides:
         return "", {}
 
-    json_compatible_types = {"json", "jsonb", "text", "varchar"}
+    json_compatible_types = set(_JSON_PARAM_DUMPERS)
     col_types = {
         (table.rel.name, column.name): column.type.name.removeprefix("pg_catalog.")
         for schema in catalog.schemas
@@ -475,6 +490,7 @@ def render_module(  # noqa: PLR0913, PLR0917
     sql_fn_name: str,
     entities: list[str],
     enums: list[str],
+    enum_registry: list[tuple[str, str]],
     query_classes: list[str],
     query_overloads: list[str],
     query_dict_entries: list[str],
@@ -498,6 +514,20 @@ def render_module(  # noqa: PLR0913, PLR0917
         imports.extend(json_import_block.strip().splitlines())
 
     imports_block = "\n".join(imports)
+
+    pre_pool_blocks: list[str] = []
+    if enums:
+        pre_pool_blocks.append("\n\n\n".join(enums))
+    if enum_registry:
+        registry_entries = ",\n    ".join(
+            f'("{pg_name}", {class_name})' for pg_name, class_name in enum_registry
+        )
+        registry_type = "list[tuple[str, type[StrEnum]]]"
+        pre_pool_blocks.append(
+            f"ENUM_TYPES: {registry_type} = [\n    {registry_entries},\n]"
+        )
+        pool_args.append("enum_types=ENUM_TYPES")
+    pre_pool_section = "".join(f"{block}\n\n\n" for block in pre_pool_blocks)
 
     pool_args_str = ",\n    ".join(pool_args)
 
@@ -535,7 +565,7 @@ from iron_sql import runtime
 {imports_block}
 
 
-{module_name.upper()}_POOL = runtime.ConnectionPool(
+{pre_pool_section}{module_name.upper()}_POOL = runtime.ConnectionPool(
     {pool_args_str},
 )
 
@@ -571,9 +601,6 @@ async def {module_name}_notify(channel: str, payload: str = "") -> None:
         await runtime.notify(conn, channel, payload)
 
 
-{"\n\n\n".join(enums)}
-
-
 {"\n\n\n".join(entities)}
 
 
@@ -603,13 +630,22 @@ def {sql_fn_name}(sql: str, row_type: str | None = None) -> Query[Any]:
     """.strip()  # noqa: E501
 
 
+def enum_class_name(
+    enum_name: str,
+    module_name: str,
+    to_pascal_fn: Callable[[str], str],
+    to_snake_fn: Callable[[str], str],
+) -> str:
+    return to_pascal_fn(f"{module_name}_{to_snake_fn(enum_name)}")
+
+
 def render_enum_class(
     enum: Enum,
     module_name: str,
     to_pascal_fn: Callable[[str], str],
     to_snake_fn: Callable[[str], str],
 ) -> str:
-    class_name = to_pascal_fn(f"{module_name}_{to_snake_fn(enum.name)}")
+    class_name = enum_class_name(enum.name, module_name, to_pascal_fn, to_snake_fn)
     members: list[str] = []
     seen_names: dict[str, int] = {}
 

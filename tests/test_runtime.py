@@ -2,16 +2,20 @@ import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 from unittest.mock import AsyncMock
 
+import psycopg
 import pytest
 
 from iron_sql.runtime import ConnectionPool
 from iron_sql.runtime import TooManyRowsError
 from iron_sql.runtime import get_one_row_or_none
 from iron_sql.runtime import json_validated
+from iron_sql.runtime import register_enums
 from iron_sql.runtime import typed_array_row
 from iron_sql.runtime import typed_scalar_row
+from tests.conftest import ProjectBuilder
 from tests.json_models import UserMetadata
 
 # =============================================================================
@@ -171,17 +175,67 @@ async def test_typed_scalar_row_array_type_mismatch(pool: ConnectionPool) -> Non
             await cur.fetchone()
 
 
-async def test_typed_scalar_row_enum_array(pool: ConnectionPool) -> None:
+async def test_register_enums_fails_fast_on_missing_type(
+    pool: ConnectionPool,
+) -> None:
+    class Missing(StrEnum):
+        A = "a"
+
+    async with pool.connection() as conn:
+        with pytest.raises(RuntimeError, match="not found in database"):
+            await register_enums(conn, [("nonexistent_enum", Missing)])
+
+
+async def test_pool_enum_types_compose_with_user_configure(
+    test_project: ProjectBuilder,
+) -> None:
     class Status(StrEnum):
         ACTIVE = "active"
         INACTIVE = "inactive"
 
-    async with (
-        pool.connection() as conn,
-        conn.cursor(row_factory=typed_array_row(Status, not_null=True)) as cur,
-    ):
-        await cur.execute("SELECT ARRAY['active', 'inactive']::text[]")
-        row = await cur.fetchone()
-        assert row is not None
-        assert row == [Status.ACTIVE, Status.INACTIVE]
-        assert all(isinstance(v, Status) for v in row)
+    user_configure_calls = 0
+
+    async def user_configure(conn: psycopg.AsyncConnection[Any]) -> None:
+        nonlocal user_configure_calls
+        user_configure_calls += 1
+        await conn.execute("SELECT 1")
+
+    pool = ConnectionPool(
+        test_project.dsn,
+        enum_types=[("user_status", Status)],
+        pool_options={"configure": user_configure, "min_size": 1, "max_size": 1},
+    )
+    try:
+        async with pool.connection() as conn:
+            cur = await conn.execute("SELECT 'active'::user_status")
+            row = await cur.fetchone()
+            assert row is not None
+            assert isinstance(row[0], Status)
+        assert user_configure_calls == 1
+    finally:
+        await pool.close()
+
+
+async def test_register_enums_on_externally_supplied_connection(
+    test_project: ProjectBuilder,
+) -> None:
+    class Status(StrEnum):
+        ACTIVE = "active"
+        INACTIVE = "inactive"
+
+    pool = ConnectionPool(test_project.dsn)
+    try:
+        async with pool.connection() as conn:
+            cur = await conn.execute("SELECT 'active'::user_status")
+            before = await cur.fetchone()
+            assert before is not None
+            assert not isinstance(before[0], Status)
+
+            await register_enums(conn, [("user_status", Status)])
+
+            cur = await conn.execute("SELECT 'active'::user_status")
+            after = await cur.fetchone()
+            assert after is not None
+            assert isinstance(after[0], Status)
+    finally:
+        await pool.close()
