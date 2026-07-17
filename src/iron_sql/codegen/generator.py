@@ -537,6 +537,7 @@ def render_module(  # noqa: PLR0913, PLR0917
 
 # fmt: off
 # pyright: reportUnusedImport=false
+# pyright: reportUnusedParameter=false
 # ruff: noqa
 
 import datetime

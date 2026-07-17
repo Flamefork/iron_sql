@@ -2,6 +2,7 @@
 
 # fmt: off
 # pyright: reportUnusedImport=false
+# pyright: reportUnusedParameter=false
 # ruff: noqa
 
 import datetime
