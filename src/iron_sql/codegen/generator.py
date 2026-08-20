@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import inflection
+from psycopg.sql import Identifier
 from pydantic import alias_generators
 
 from iron_sql.codegen.sqlc import Catalog
@@ -127,15 +128,9 @@ class ModuleExprRef:
 
 _SQL_TYPE_MAP: dict[str, str] = {
     "bool": "bool",
-    "boolean": "bool",
     "int2": "int",
     "int4": "int",
     "int8": "int",
-    "smallint": "int",
-    "integer": "int",
-    "bigint": "int",
-    "serial": "int",
-    "bigserial": "int",
     "oid": "int",
     "float4": "float",
     "float8": "float",
@@ -160,6 +155,21 @@ _SQL_TYPE_MAP: dict[str, str] = {
     "any": "object",
     "anyelement": "object",
 }
+
+
+def canonical_type_name(column: Column, catalog: Catalog) -> str:
+    # Identity before mapping: a user-defined type never loses to a built-in that
+    # happens to share a spelling. A name qualified with a user schema is one by
+    # construction - sqlc reports built-ins either under pg_catalog or, from the live
+    # database, with no schema at all. Otherwise only the catalog can tell, and it
+    # carries enums and composite types but no domains.
+    name = column.pg_type_name
+    if column.type.schema_name not in {"", "pg_catalog"}:
+        return name
+    schema = catalog.schema_by_ref(column.type)
+    if schema.has_enum(name) or schema.has_composite(name):
+        return name
+    return column.pg_builtin_type_name
 
 
 @dataclass(kw_only=True, frozen=True)
@@ -194,7 +204,7 @@ class TypeResolver:
         )
 
     def _resolve(self, column: Column) -> tuple[str, str, str | None, str | None]:
-        db_type = column.type.name.removeprefix("pg_catalog.")
+        db_type = canonical_type_name(column, self.catalog)
 
         json_type = None
         if column.table is not None:
@@ -208,14 +218,14 @@ class TypeResolver:
             py_type = json_type
         elif db_type in self.type_overrides:
             py_type = self.type_overrides[db_type]
-        elif db_type in _SQL_TYPE_MAP:
-            py_type = _SQL_TYPE_MAP[db_type]
         elif self.catalog.schema_by_ref(column.type).has_enum(db_type):
             py_type = (
                 self.to_pascal_fn(f"{self.module_name}_{self.to_snake_fn(db_type)}")
                 if self.module_name
                 else "str"
             )
+        elif db_type in _SQL_TYPE_MAP:
+            py_type = _SQL_TYPE_MAP[db_type]
         else:
             warnings.warn(
                 f"Unknown SQL type: {db_type}, mapped to 'object'",
@@ -235,16 +245,38 @@ class TypeResolver:
         return db_type, py_type, element_py_type, json_type
 
 
+def all_columns(sqlc_res: SQLCResult) -> Iterator[Column]:
+    for query in sqlc_res.queries:
+        yield from query.columns
+        yield from (param.column for param in query.params)
+
+
 def collect_used_enums(sqlc_res: SQLCResult) -> set[tuple[str, str]]:
     return {
-        (schema.name, col.type.name)
-        for col in (
-            *(c for q in sqlc_res.queries for c in q.columns),
-            *(p.column for q in sqlc_res.queries for p in q.params),
-        )
+        (schema.name, name)
+        for col in all_columns(sqlc_res)
+        for name in (canonical_type_name(col, sqlc_res.catalog),)
         for schema in (sqlc_res.catalog.schema_by_ref(col.type),)
-        if schema.has_enum(col.type.name)
+        if schema.has_enum(name)
     }
+
+
+def validate_type_overrides(overrides: dict[str, str], sqlc_res: SQLCResult) -> None:
+    # Without queries there are no column types at all, so every key would look
+    # unused and the report would degenerate into an empty list.
+    if not sqlc_res.queries:
+        return
+
+    used_types = {
+        canonical_type_name(col, sqlc_res.catalog) for col in all_columns(sqlc_res)
+    }
+    unused = sorted(set(overrides) - used_types)
+    if unused:
+        msg = (
+            f"type_overrides: no query column or parameter has type "
+            f"{', '.join(unused)}; types in use: {', '.join(sorted(used_types))}"
+        )
+        raise ValueError(msg)
 
 
 def map_sqlc_error(
@@ -308,6 +340,8 @@ def generate_sql_module(  # noqa: PLR0913, PLR0914
         logger.error(f"Error running SQLC:\n{mapped}")
         return False
 
+    validate_type_overrides(type_overrides or {}, sqlc_res)
+
     json_import_block, json_column_type_overrides = resolve_json_model_overrides(
         json_model_overrides or {}, sqlc_res.catalog
     )
@@ -346,7 +380,7 @@ def generate_sql_module(  # noqa: PLR0913, PLR0914
 
     enum_registry = sorted(
         (
-            f"{schema.name}.{e.name}",
+            Identifier(schema.name, e.name).as_string(None),
             enum_class_name(e.name, module_name, to_pascal_fn, to_snake_fn),
         )
         for schema, e in enum_specs
@@ -435,7 +469,7 @@ def resolve_json_model_overrides(
 
     json_compatible_types = set(_JSON_PARAM_DUMPERS)
     col_types = {
-        (table.rel.name, column.name): column.type.name.removeprefix("pg_catalog.")
+        (table.rel.name, column.name): canonical_type_name(column, catalog)
         for schema in catalog.schemas
         for table in schema.tables
         for column in table.columns
@@ -520,7 +554,7 @@ def render_module(  # noqa: PLR0913, PLR0917
         pre_pool_blocks.append("\n\n\n".join(enums))
     if enum_registry:
         registry_entries = ",\n    ".join(
-            f'("{pg_name}", {class_name})' for pg_name, class_name in enum_registry
+            f"({pg_name!r}, {class_name})" for pg_name, class_name in enum_registry
         )
         registry_type = "list[tuple[str, type[StrEnum]]]"
         pre_pool_blocks.append(

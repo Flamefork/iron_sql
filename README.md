@@ -63,7 +63,7 @@ The `sqlc` binary is bundled automatically via the `sqlc` Python package.
    - overloads for the `*_sql()` helper so editors infer return types.
 
 ## Customization
-- **Type overrides.** `type_overrides={"custom_type": "int"}` maps database type names to Python type strings.
+- **Type overrides.** `type_overrides={"float8": "decimal.Decimal"}` maps database type names to Python type strings. For built-in types the key is the PostgreSQL internal name (`float8`, `varchar`, `timestamptz`), not the SQL-standard spelling (`double precision`, `character varying`); for a user-defined enum, domain or extension type it is the type name as declared (`custom_int`, `citext`). A key that no query column or parameter uses raises `ValueError` listing the type names actually in use.
 - **JSON model overrides.** `json_model_overrides={"users.metadata": "myapp.models:UserMeta"}` adds Pydantic validation for JSON/JSONB columns.
 - **Naming conventions.** Supply `to_pascal_fn` and `to_snake_fn` callables to control generated names.
 - **Connection settings.** `dsn_expr` and `pool_options_expr` are written verbatim into the generated module; point them at config variables, env var lookups, or function calls.
@@ -79,9 +79,10 @@ The `sqlc` binary is bundled automatically via the `sqlc` Python package.
 
 ## Example
 
-The [`example/`](example/) directory contains a complete working setup: a PostgreSQL schema, generation script with testcontainers, and sample query definitions. See [`example/generate.py`](example/generate.py) for the codegen call and [`example/myapp/main.py`](example/myapp/main.py) for query usage.
+The [`example/`](example/) directory contains a complete working setup: a PostgreSQL schema, generation script with testcontainers, and sample query definitions. See [`example/generate.py`](example/generate.py) for the codegen call and [`example/main.py`](example/main.py) for query usage.
 
 ## Validation and Troubleshooting
 - Errors identify the file and line where the problematic statement lives.
 - Unknown SQL types map to `object` and emit `UnknownSQLTypeWarning` (promotable to error with `warnings.filterwarnings`).
 - Statements with the same SQL but conflicting `row_type` values are rejected at generation time.
+- A user-defined type may reuse a standard SQL spelling of a built-in (`integer`, `real`). Enums and composite types are recognised as user-defined either way. A domain or extension type is recognised only where the column references it schema-qualified (`v public."integer"`), because an unqualified reference reaches iron_sql spelled exactly like the built-in; such a column resolves to the built-in, and `type_overrides` cannot name it.

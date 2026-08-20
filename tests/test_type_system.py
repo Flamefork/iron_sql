@@ -1,8 +1,11 @@
 import datetime
+import decimal
+import inspect
 import ipaddress
 import warnings
 from enum import StrEnum
 from typing import Any
+from typing import LiteralString
 from typing import get_args
 
 import pytest
@@ -12,13 +15,17 @@ from iron_sql.runtime import ConnectionPool
 from tests.conftest import ProjectBuilder
 
 
+def query_signature(query: Any) -> inspect.Signature:
+    return inspect.signature(query.__class__.query_single_row)
+
+
+def annotation_types(annotation: Any) -> set[Any]:
+    args = get_args(annotation)
+    return {a for a in args if a is not type(None)} if args else {annotation}
+
+
 def assert_return_types(query: Any, expected: set[type]) -> None:
-    ret = type(query).query_single_row.__annotations__["return"]  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-    ret_args = get_args(ret)
-    actual: set[Any] = (
-        {a for a in ret_args if a is not type(None)} if ret_args else {ret}
-    )
-    assert actual == expected
+    assert annotation_types(query_signature(query).return_annotation) == expected
 
 
 async def test_enum_generation(test_project: ProjectBuilder) -> None:
@@ -615,3 +622,252 @@ async def test_type_overrides_suppress_unknown_warning_and_override_annotation(
     val = await q.query_single_row()
     assert val == 1
     assert isinstance(val, int)
+
+
+_ANALYZER_VOCABULARY_SCHEMA = """
+    CREATE TABLE vocabulary (
+        f8 double precision,
+        f4 real,
+        i2 smallint,
+        i4 integer,
+        i8 bigint,
+        ss smallserial,
+        s serial,
+        bs bigserial,
+        s2 serial2,
+        s4 serial4,
+        s8 serial8,
+        b boolean,
+        num numeric(10, 2),
+        v character varying(20),
+        ch character(3),
+        ts timestamp without time zone,
+        tstz timestamp with time zone,
+        tm time without time zone,
+        tmtz time with time zone,
+        c "char"
+    );
+"""
+
+_ANALYZER_VOCABULARY_CASES = [
+    ("f8", "min", float),
+    ("f4", "min", float),
+    ("i2", "min", int),
+    ("i4", "min", int),
+    ("i8", "min", int),
+    ("ss", "min", int),
+    ("s", "min", int),
+    ("bs", "min", int),
+    ("s2", "min", int),
+    ("s4", "min", int),
+    ("s8", "min", int),
+    ("b", "bool_and", bool),
+    ("num", "min", decimal.Decimal),
+    ("v", "min", str),
+    ("ch", "min", str),
+    ("ts", "min", datetime.datetime),
+    ("tstz", "min", datetime.datetime),
+    ("tm", "min", datetime.time),
+    ("tmtz", "min", datetime.time),
+    ("c", "min", str),
+]
+
+
+async def test_analyzer_type_names_map_like_static_ones(
+    test_project: ProjectBuilder,
+) -> None:
+    await test_project.extend_schema(_ANALYZER_VOCABULARY_SCHEMA)
+
+    static = {
+        col: f"SELECT vocabulary.{col} as v FROM vocabulary"
+        for col, _, _ in _ANALYZER_VOCABULARY_CASES
+    }
+    derived = {
+        col: f"SELECT {agg}(vocabulary.{col}) as v FROM vocabulary"
+        for col, agg, _ in _ANALYZER_VOCABULARY_CASES
+    }
+    parametrized = {
+        col: (
+            f"SELECT vocabulary.{col} as v FROM vocabulary WHERE vocabulary.{col} = @p"
+        )
+        for col, _, _ in _ANALYZER_VOCABULARY_CASES
+    }
+    for axis, statements in (
+        ("static", static),
+        ("derived", derived),
+        ("param", parametrized),
+    ):
+        for col, stmt in statements.items():
+            test_project.add_query(f"get_{col}_{axis}", stmt)
+
+    with warnings.catch_warnings(record=True) as warning_messages:
+        warnings.simplefilter("always", UnknownSQLTypeWarning)
+        mod = test_project.generate()
+
+    assert not [
+        str(w.message)
+        for w in warning_messages
+        if issubclass(w.category, UnknownSQLTypeWarning)
+    ]
+
+    for col, _, py_type in _ANALYZER_VOCABULARY_CASES:
+        for axis, statements in (("static", static), ("derived", derived)):
+            returned = query_signature(
+                mod.testdb_sql(statements[col])
+            ).return_annotation
+            assert annotation_types(returned) == {py_type}, (col, axis)
+
+        param = query_signature(mod.testdb_sql(parametrized[col])).parameters["p"]
+        assert annotation_types(param.annotation) == {py_type}, (col, "param")
+
+
+def test_type_overrides_ignored_when_no_queries(
+    test_project: ProjectBuilder,
+) -> None:
+    mod = test_project.generate(type_overrides={"jsonb": "str"})
+
+    with pytest.raises(KeyError, match="Unknown statement"):
+        mod.testdb_sql("SELECT * FROM users")
+
+
+_SHADOWING_ENUM_NAMES: list[LiteralString] = [
+    "boolean",
+    "bigint",
+    "integer",
+    "real",
+    "text",
+    "varchar",
+]
+
+
+@pytest.mark.parametrize("type_name", _SHADOWING_ENUM_NAMES)
+async def test_enum_named_after_builtin_type_wins(
+    test_project: ProjectBuilder, type_name: LiteralString
+) -> None:
+    # Schema-qualified on purpose. For a name that is also a real typname (text) an
+    # unqualified reference hands the column back to pg_catalog, so qualifying is the
+    # only way to get a column whose type really is the user-defined one.
+    table = f"shadow_{type_name}"
+    await test_project.extend_schema(f"""
+    CREATE TYPE public."{type_name}" AS ENUM ('first', 'second');
+    CREATE TABLE {table} (
+        id integer PRIMARY KEY,
+        v public."{type_name}" NOT NULL
+    );
+    """)
+
+    stmt = f"SELECT {table}.v as v FROM {table}"
+    test_project.add_query("get_v", stmt)
+
+    with warnings.catch_warnings(record=True) as warning_messages:
+        warnings.simplefilter("always", UnknownSQLTypeWarning)
+        mod = test_project.generate()
+
+    assert not [
+        str(w.message)
+        for w in warning_messages
+        if issubclass(w.category, UnknownSQLTypeWarning)
+    ]
+
+    enum_cls = getattr(mod, f"Testdb{type_name.capitalize()}")
+    assert_return_types(mod.testdb_sql(stmt), {enum_cls})
+
+    async with mod.testdb_connection() as conn:
+        await conn.execute(f"INSERT INTO {table} (id, v) VALUES (1, 'first')")
+
+    assert await mod.testdb_sql(stmt).query_single_row() is enum_cls.FIRST
+
+
+async def test_type_overrides_apply_to_analyzer_type_name(
+    test_project: ProjectBuilder,
+) -> None:
+    await test_project.extend_schema("""
+    CREATE TABLE readings (
+        value double precision NOT NULL
+    );
+    """)
+
+    stmt = "SELECT min(readings.value) as v FROM readings"
+    test_project.add_query("get_min", stmt)
+
+    mod = test_project.generate(type_overrides={"float8": "decimal.Decimal"})
+
+    assert_return_types(mod.testdb_sql(stmt), {decimal.Decimal})
+
+
+async def test_quoted_enum_name_resolves_in_parameter_position(
+    test_project: ProjectBuilder,
+) -> None:
+    await test_project.extend_schema("""
+    CREATE TYPE "camelCaseEnum" AS ENUM ('first', 'second');
+    CREATE TABLE camel (
+        id integer PRIMARY KEY,
+        v "camelCaseEnum" NOT NULL
+    );
+    """)
+
+    stmt = "SELECT camel.id as v FROM camel WHERE camel.v = @p"
+    test_project.add_query("get_by_v", stmt)
+
+    with warnings.catch_warnings(record=True) as warning_messages:
+        warnings.simplefilter("always", UnknownSQLTypeWarning)
+        mod = test_project.generate()
+
+    assert not [
+        str(w.message)
+        for w in warning_messages
+        if issubclass(w.category, UnknownSQLTypeWarning)
+    ]
+
+    enum_cls = mod.TestdbCamelCaseEnum
+
+    param = query_signature(mod.testdb_sql(stmt)).parameters["p"]
+    assert annotation_types(param.annotation) == {enum_cls}
+
+    async with mod.testdb_connection() as conn:
+        await conn.execute("INSERT INTO camel (id, v) VALUES (1, 'first')")
+
+    assert await mod.testdb_sql(stmt).query_single_row(p=enum_cls.FIRST) == 1
+
+
+async def test_type_overrides_apply_to_qualified_domain(
+    test_project: ProjectBuilder,
+) -> None:
+    await test_project.extend_schema("""
+    CREATE DOMAIN public."integer" AS text;
+    CREATE TABLE labels (
+        id integer PRIMARY KEY,
+        v public."integer" NOT NULL
+    );
+    """)
+
+    stmt = "SELECT labels.v as v FROM labels"
+    test_project.add_query("get_v", stmt)
+
+    mod = test_project.generate(type_overrides={"integer": "str"})
+
+    assert_return_types(mod.testdb_sql(stmt), {str})
+
+    async with mod.testdb_connection() as conn:
+        await conn.execute("INSERT INTO labels (id, v) VALUES (1, 'label')")
+
+    assert await mod.testdb_sql(stmt).query_single_row() == "label"
+
+
+async def test_type_overrides_reject_unused_type_name(
+    test_project: ProjectBuilder,
+) -> None:
+    await test_project.extend_schema("""
+    CREATE TABLE measurements (
+        value double precision NOT NULL
+    );
+    """)
+
+    test_project.add_query(
+        "get_value", "SELECT measurements.value as v FROM measurements"
+    )
+
+    with pytest.raises(ValueError, match="double precision") as excinfo:
+        test_project.generate(type_overrides={"double precision": "float"})
+
+    assert "float8" in str(excinfo.value)

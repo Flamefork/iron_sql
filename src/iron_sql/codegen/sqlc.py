@@ -19,6 +19,33 @@ class CatalogReference(pydantic.BaseModel):
     name: str
 
 
+# Spellings of built-in types, folded onto the internal pg_catalog name. One sqlc run
+# reports type names from two sources at once, depending on where the column sits in
+# the query. Names taken from the catalog built by parsing the schema are internal
+# pg_catalog ones (float8, varchar), except for the serial shorthands, which pass
+# through verbatim and name no type at all. Names resolved against the live database
+# are SQL standard spellings (double precision, integer).
+#
+# Only spellings observed in the output are listed: sqlc rewrites most of the standard
+# ones back to pg_catalog names itself (character varying, timestamp with time zone),
+# so entries for those would never match. test_analyzer_type_names_map_like_static_ones
+# fails loudly if that ever stops being true.
+_PG_TYPE_ALIASES: dict[str, str] = {
+    "bigint": "int8",
+    "bigserial": "int8",
+    "boolean": "bool",
+    "double precision": "float8",
+    "integer": "int4",
+    "real": "float4",
+    "serial": "int4",
+    "serial2": "int2",
+    "serial4": "int4",
+    "serial8": "int8",
+    "smallint": "int2",
+    "smallserial": "int2",
+}
+
+
 class Column(pydantic.BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -38,6 +65,19 @@ class Column(pydantic.BaseModel):
     original_name: str
     unsigned: bool
     array_dims: int
+
+    @property
+    def pg_type_name(self) -> str:
+        return self.type.name.removeprefix("pg_catalog.").strip('"')
+
+    @property
+    def pg_builtin_type_name(self) -> str:
+        name = self.type.name.removeprefix("pg_catalog.")
+        # A quoted name is an identifier the database had to escape, never one of the
+        # spellings PostgreSQL writes for a type of its own.
+        if name.startswith('"'):
+            return name.strip('"')
+        return _PG_TYPE_ALIASES.get(name, name)
 
 
 class Table(pydantic.BaseModel):
@@ -74,6 +114,9 @@ class Schema(pydantic.BaseModel):
 
     def has_enum(self, name: str) -> bool:
         return any(e.name == name for e in self.enums)
+
+    def has_composite(self, name: str) -> bool:
+        return any(c.name == name for c in self.composite_types)
 
 
 class Catalog(pydantic.BaseModel):

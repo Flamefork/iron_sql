@@ -48,8 +48,8 @@ class MydbTaskStatus(StrEnum):
 
 
 ENUM_TYPES: list[tuple[str, type[StrEnum]]] = [
-    ("public.task_priority", MydbTaskPriority),
-    ("public.task_status", MydbTaskStatus),
+    ('"public"."task_priority"', MydbTaskPriority),
+    ('"public"."task_status"', MydbTaskStatus),
 ]
 
 
