@@ -23,6 +23,15 @@ The `sqlc` binary is bundled automatically via the `sqlc` Python package.
 - **Streaming.** `query_stream()` uses server-side cursors for memory-efficient iteration over large result sets.
 - **Safe by default.** Helper methods enforce expected row counts instead of returning silent `None`.
 
+## Design Constraints
+
+Every query is a static SQL literal at its call site. That one constraint is where the guarantees come from: `sqlc` can type the statement ahead of time, generated `Literal` overloads hand your editor the exact result type, and the SQL that runs is the SQL you read. Nothing assembles a statement at runtime, so `pg_stat_statements` groups executions one-to-one with the query classes in the generated module.
+
+Non-goals, by construction:
+- **SQL fragment composition.** No shared `WHERE` snippets stitched together before execution.
+- **Dynamic query assembly.** Conditional filters belong in the SQL itself (`sqlc.narg('status')::task_status IS NULL OR status = @status?`), not in Python string building.
+- **Lazy relations and object graphs.** Nothing loads on attribute access; related rows come from a query you wrote.
+
 ## Package Layout
 - `runtime.py` -- async `ConnectionPool`, row helpers (`get_one_row`, `typed_scalar_row`), JSON validation decorators.
 - `codegen/generator.py` -- query discovery, type resolution, module rendering.
@@ -67,6 +76,7 @@ The `sqlc` binary is bundled automatically via the `sqlc` Python package.
 - **JSON model overrides.** `json_model_overrides={"users.metadata": "myapp.models:UserMeta"}` adds Pydantic validation for JSON/JSONB columns.
 - **Naming conventions.** Supply `to_pascal_fn` and `to_snake_fn` callables to control generated names.
 - **Connection settings.** `dsn_expr` and `pool_options_expr` are written verbatim into the generated module; point them at config variables, env var lookups, or function calls.
+- **Session settings and timeouts.** `PoolOptions["kwargs"]` reaches every pooled connection, so libpq `options` carries server-side settings: `{"kwargs": {"options": "-c statement_timeout=5000 -c lock_timeout=1000"}}`. `statement_timeout` bounds a single statement, not a query method: a `query_stream()` that iterates for longer than the timeout is unaffected, because `DECLARE` and each `FETCH` count separately. Consider `idle_in_transaction_session_timeout` alongside them to bound transactions that stay open while the application is busy elsewhere.
 - **Debug artifacts.** Pass `debug_path` to save sqlc inputs and outputs for inspection.
 
 ## Runtime Highlights

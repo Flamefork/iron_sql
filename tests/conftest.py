@@ -184,9 +184,13 @@ class ProjectBuilder:
         *,
         type_overrides: dict[str, str] | None = None,
         json_model_overrides: dict[str, str] | None = None,
+        pool_options: dict[str, Any] | None = None,
     ) -> bool:
+        config_lines = [f'DSN = "{self.dsn}"']
+        if pool_options is not None:
+            config_lines.append(f"POOL_OPTIONS = {pool_options!r}")
         (self.app_dir / "config.py").write_text(
-            f'DSN = "{self.dsn}"\n', encoding="utf-8"
+            "\n".join(config_lines) + "\n", encoding="utf-8"
         )
 
         if self.queries_source is not None:
@@ -217,6 +221,11 @@ class ProjectBuilder:
             schema_path=Path("schema.sql"),
             module_full_name=self.module_full_name,
             dsn_expr=f"{self.app_pkg}.config:DSN",
+            pool_options_expr=(
+                f"{self.app_pkg}.config:POOL_OPTIONS"
+                if pool_options is not None
+                else None
+            ),
             src_path=self.src_path,
             tempdir_path=self.src_path,
             type_overrides=type_overrides,
@@ -228,10 +237,12 @@ class ProjectBuilder:
         *,
         type_overrides: dict[str, str] | None = None,
         json_model_overrides: dict[str, str] | None = None,
+        pool_options: dict[str, Any] | None = None,
     ) -> Any:
         self.generate_no_import(
             type_overrides=type_overrides,
             json_model_overrides=json_model_overrides,
+            pool_options=pool_options,
         )
 
         importlib.invalidate_caches()
