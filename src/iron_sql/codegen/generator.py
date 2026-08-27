@@ -794,7 +794,7 @@ async def execute({", ".join(query_fn_params)}) -> None:
     return f"""
 
 class {query_name}(Query[{result}]):
-    # See: {", ".join(locations)}
+    _locations = {tuple(locations)!r}
     _stmt = psycopg.sql.SQL({sql!r})
     _row_factory = staticmethod({row_factory})
 

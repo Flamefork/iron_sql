@@ -2,13 +2,22 @@ import asyncio
 import contextlib
 import functools
 import itertools
+import logging
+import time
 import types
+import weakref
+from collections import defaultdict
+from collections import deque
 from collections.abc import AsyncGenerator
 from collections.abc import Awaitable
 from collections.abc import Callable
+from collections.abc import Generator
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
+from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
+from dataclasses import field
 from enum import StrEnum
 from typing import Any
 from typing import ClassVar
@@ -27,6 +36,8 @@ import psycopg_pool
 from psycopg._cursor_base import BaseCursor
 from pydantic import TypeAdapter
 
+logger = logging.getLogger(__name__)
+
 
 @functools.cache
 def get_adapter(typ: object) -> TypeAdapter[Any]:
@@ -38,6 +49,10 @@ class NoRowsError(Exception):
 
 
 class TooManyRowsError(Exception):
+    pass
+
+
+class RepeatedQueryError(Exception):
     pass
 
 
@@ -129,7 +144,105 @@ async def _ensure_transaction(
             raise psycopg.InterfaceError(msg)
 
 
+@dataclass
+class _TaskExecutions:
+    timestamps: defaultdict[type["Query[Any]"], deque[float]] = field(
+        default_factory=lambda: defaultdict(deque)
+    )
+    reported: set[type["Query[Any]"]] = field(default_factory=set)
+
+
+@dataclass
+class _ActiveDetection:
+    executions: int
+    within_seconds: float
+    strict: bool
+    by_task: weakref.WeakKeyDictionary[asyncio.Task[Any], _TaskExecutions] = field(
+        default_factory=weakref.WeakKeyDictionary
+    )
+
+
+@dataclass
+class _DetectionSlot:
+    active: _ActiveDetection | None = None
+
+
+_detection_slot = _DetectionSlot()
+
+_MIN_EXECUTIONS = 2
+
+_MAX_STATEMENT_CHARS = 120
+
+
+@contextmanager
+def detect_sql_repeats(
+    *, executions: int = 10, within_seconds: float = 1.0, strict: bool = False
+) -> Generator[None]:
+    if executions < _MIN_EXECUTIONS:
+        msg = f"executions must be at least {_MIN_EXECUTIONS}, got: {executions}"
+        raise ValueError(msg)
+    if within_seconds <= 0:
+        msg = f"within_seconds must be positive, got: {within_seconds}"
+        raise ValueError(msg)
+    if _detection_slot.active is not None:
+        msg = "detect_sql_repeats is already active"
+        raise RuntimeError(msg)
+
+    _detection_slot.active = _ActiveDetection(
+        executions=executions, within_seconds=within_seconds, strict=strict
+    )
+    try:
+        yield
+    finally:
+        _detection_slot.active = None
+
+
+def _statement_summary(stmt: psycopg.sql.SQL) -> str:
+    text = " ".join(stmt.as_string(None).split())
+    if len(text) <= _MAX_STATEMENT_CHARS:
+        return text
+    return text[:_MAX_STATEMENT_CHARS] + "..."
+
+
+def _record_execution(
+    query_cls: "type[Query[Any]]",
+    stmt: psycopg.sql.SQL,
+    locations: tuple[str, ...],
+) -> None:
+    active = _detection_slot.active
+    if active is None:
+        return
+    task = asyncio.current_task()
+    if task is None:
+        return
+
+    task_executions = active.by_task.setdefault(task, _TaskExecutions())
+    if query_cls in task_executions.reported:
+        return
+
+    now = time.monotonic()
+    timestamps = task_executions.timestamps[query_cls]
+    timestamps.append(now)
+    cutoff = now - active.within_seconds
+    while timestamps[0] < cutoff:
+        timestamps.popleft()
+    if len(timestamps) < active.executions:
+        return
+
+    task_executions.reported.add(query_cls)
+    message = (
+        f"Repeated query at {', '.join(locations)}: {_statement_summary(stmt)} "
+        f"executed {len(timestamps)} times within {active.within_seconds}s "
+        f"in a single asyncio task"
+    )
+    timestamps.clear()
+    if active.strict:
+        raise RepeatedQueryError(message)
+    logger.warning(message)
+
+
 class Query[T]:
+    _locations: ClassVar[tuple[str, ...]]
     _stmt: ClassVar[psycopg.sql.SQL]
     _row_factory: psycopg.rows.BaseRowFactory[T]
     _connection_factory: Callable[
@@ -145,6 +258,7 @@ class Query[T]:
     async def _client_cursor(
         self, params: psycopg.abc.Params | None
     ) -> AsyncGenerator[psycopg.AsyncRawCursor[T]]:
+        _record_execution(type(self), self._stmt, self._locations)
         async with (
             self._connection_factory() as conn,
             psycopg.AsyncRawCursor(conn, row_factory=self._row_factory) as cur,
@@ -156,6 +270,7 @@ class Query[T]:
     async def _server_cursor(
         self, params: psycopg.abc.Params | None
     ) -> AsyncGenerator[psycopg.AsyncRawServerCursor[T]]:
+        _record_execution(type(self), self._stmt, self._locations)
         async with (
             self._connection_factory() as conn,
             _ensure_transaction(conn),

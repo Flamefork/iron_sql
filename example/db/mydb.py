@@ -126,7 +126,7 @@ class Query[T](runtime.Query[T]):
 
 
 class Query_3ee53b6909da8b4496346dda36c9f442(Query[None]):
-    # See: example/main.py:23
+    _locations = ('example/main.py:23',)
     _stmt = psycopg.sql.SQL('INSERT INTO users (id, username, email)\nVALUES ($1, $2, $3)')
     _row_factory = staticmethod(psycopg.rows.scalar_row)
 
@@ -136,7 +136,7 @@ class Query_3ee53b6909da8b4496346dda36c9f442(Query[None]):
 
 
 class Query_67ac0768d48a654b1a305124c92372e8(Query[None]):
-    # See: example/main.py:33
+    _locations = ('example/main.py:33',)
     _stmt = psycopg.sql.SQL('INSERT INTO projects (id, name, owner_id, settings)\nVALUES ($1, $2, $3, $4)')
     _row_factory = staticmethod(psycopg.rows.scalar_row)
 
@@ -146,7 +146,7 @@ class Query_67ac0768d48a654b1a305124c92372e8(Query[None]):
 
 
 class Query_bd4c62c78a942bfd1f087f87a19f2743(Query[None]):
-    # See: example/main.py:50, example/main.py:65
+    _locations = ('example/main.py:50', 'example/main.py:65')
     _stmt = psycopg.sql.SQL('INSERT INTO tasks (id, project_id, title, priority, assignee_id, metadata, due_date)\nVALUES ($1, $2, $3, $4, $5, $6, $7)')
     _row_factory = staticmethod(psycopg.rows.scalar_row)
 
@@ -156,7 +156,7 @@ class Query_bd4c62c78a942bfd1f087f87a19f2743(Query[None]):
 
 
 class Query_12e061f7aa94bf484295ab0018520059(Query[None]):
-    # See: example/main.py:81, example/main.py:168
+    _locations = ('example/main.py:81', 'example/main.py:168')
     _stmt = psycopg.sql.SQL('UPDATE tasks SET status = $1 WHERE id = $2')
     _row_factory = staticmethod(psycopg.rows.scalar_row)
 
@@ -166,7 +166,7 @@ class Query_12e061f7aa94bf484295ab0018520059(Query[None]):
 
 
 class Query_46242a02ffe365dc17851a034fdc1d30(Query[MydbUser]):
-    # See: example/main.py:87
+    _locations = ('example/main.py:87',)
     _stmt = psycopg.sql.SQL('SELECT id, username, email, created_at FROM users ORDER BY created_at')
     _row_factory = staticmethod(psycopg.rows.class_row(MydbUser))
 
@@ -187,7 +187,7 @@ class Query_46242a02ffe365dc17851a034fdc1d30(Query[MydbUser]):
 
 
 class Query_41cb2f3cea216a76ba87b6ddb70e6be5(Query[MydbUser]):
-    # See: example/main.py:93, example/main.py:146
+    _locations = ('example/main.py:93', 'example/main.py:146')
     _stmt = psycopg.sql.SQL('SELECT id, username, email, created_at FROM users WHERE id = $1')
     _row_factory = staticmethod(psycopg.rows.class_row(MydbUser))
 
@@ -208,7 +208,7 @@ class Query_41cb2f3cea216a76ba87b6ddb70e6be5(Query[MydbUser]):
 
 
 class Query_ce9822661c2a7e0e716755087929ebd9(Query[MydbTask]):
-    # See: example/main.py:99, example/main.py:111, example/main.py:153
+    _locations = ('example/main.py:99', 'example/main.py:111', 'example/main.py:153')
     _stmt = psycopg.sql.SQL('SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\nFROM tasks\nWHERE project_id = $1 AND ($2::task_status IS NULL OR status = $2)')
     _row_factory = staticmethod(psycopg.rows.class_row(MydbTask))
 
@@ -229,7 +229,7 @@ class Query_ce9822661c2a7e0e716755087929ebd9(Query[MydbTask]):
 
 
 class Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount(Query[TaskStatusCount]):
-    # See: example/main.py:124
+    _locations = ('example/main.py:124',)
     _stmt = psycopg.sql.SQL('SELECT status, count(*) AS task_count\nFROM tasks WHERE project_id = $1\nGROUP BY status ORDER BY status')
     _row_factory = staticmethod(psycopg.rows.class_row(TaskStatusCount))
 
@@ -250,7 +250,7 @@ class Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount(Query[TaskStatusCou
 
 
 class Query_07cbb3e5226e35adbd17171f38ab7216(Query[uuid.UUID]):
-    # See: example/main.py:136
+    _locations = ('example/main.py:136',)
     _stmt = psycopg.sql.SQL('SELECT id FROM tasks WHERE project_id = $1 AND title = $2')
     _row_factory = staticmethod(runtime.typed_scalar_row(uuid.UUID, not_null=True))
 
@@ -271,7 +271,7 @@ class Query_07cbb3e5226e35adbd17171f38ab7216(Query[uuid.UUID]):
 
 
 class Query_29c838280e39383dd6b0760431eb3e60(Query[int]):
-    # See: example/main.py:174
+    _locations = ('example/main.py:174',)
     _stmt = psycopg.sql.SQL('SELECT count(*) FROM tasks WHERE status = $1')
     _row_factory = staticmethod(runtime.typed_scalar_row(int, not_null=True))
 

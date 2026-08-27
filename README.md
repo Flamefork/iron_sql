@@ -25,12 +25,14 @@ The `sqlc` binary is bundled automatically via the `sqlc` Python package.
 
 ## Design Constraints
 
-Every query is a static SQL literal at its call site. That one constraint is where the guarantees come from: `sqlc` can type the statement ahead of time, generated `Literal` overloads hand your editor the exact result type, and the SQL that runs is the SQL you read. Nothing assembles a statement at runtime, so `pg_stat_statements` groups executions one-to-one with the query classes in the generated module.
+Every query is a static SQL literal at its call site. That one constraint is where the guarantees come from: `sqlc` can type the statement ahead of time, generated `Literal` overloads hand your editor the exact result type, and the SQL that runs is the SQL you read. Nothing assembles a statement at runtime, so every statement text is fixed at generation time and appears verbatim in the generated module, next to the call sites that use it. That makes a hot `pg_stat_statements` entry easy to trace back -- though the mapping is not one-to-one: PostgreSQL folds statements that differ only in literal constants into a single entry, and splits one statement across users, databases, and `search_path`.
 
 Non-goals, by construction:
 - **SQL fragment composition.** No shared `WHERE` snippets stitched together before execution.
 - **Dynamic query assembly.** Conditional filters belong in the SQL itself (`sqlc.narg('status')::task_status IS NULL OR status = @status?`), not in Python string building.
 - **Lazy relations and object graphs.** Nothing loads on attribute access; related rows come from a query you wrote.
+
+A 1+N pattern is therefore never implicit: it is always a loop in your own code around a statement you can read. [`detect_sql_repeats()`](#detecting-accidental-1n) reports one when you write it by accident.
 
 ## Package Layout
 - `runtime.py` -- async `ConnectionPool`, row helpers (`get_one_row`, `typed_scalar_row`), JSON validation decorators.
@@ -86,6 +88,35 @@ Non-goals, by construction:
 - `query_stream()` returns an async context manager yielding an `AsyncGenerator`; uses server-side cursors with automatic transaction management.
 - JSONB params are sent with `psycopg.types.json.Jsonb`; JSON with `psycopg.types.json.Json`. Scalar row factories validate types at runtime.
 - `json_validated` decorator applies Pydantic model validation to dataclass fields on construction.
+- `detect_sql_repeats()` reports accidental 1+N loops; see [below](#detecting-accidental-1n).
+
+## Detecting Accidental 1+N
+
+`detect_sql_repeats()` watches for one statement executing many times in quick succession inside a single asyncio task -- the shape of a query sitting in a loop. Wrap the part of the process you want watched:
+
+```python
+from contextlib import asynccontextmanager
+
+from iron_sql import detect_sql_repeats
+
+@asynccontextmanager                       # e.g. an ASGI lifespan in development
+async def lifespan(app):
+    with detect_sql_repeats(executions=10, within_seconds=1.0):
+        yield
+```
+
+```python
+@pytest.fixture(autouse=True)              # or a fixture that fails the run in CI
+def no_repeated_queries():
+    with detect_sql_repeats(executions=5, within_seconds=10.0, strict=True):
+        yield
+```
+
+`executions` is how many runs of the same statement already look like a loop; `within_seconds` is the sliding window they must fall into. Both default to a deliberately quiet `executions=10, within_seconds=1.0`. Tune them to your code rather than to these numbers: set `executions` just above the largest batch you legitimately run in a loop (inserting a handful of rows one statement at a time is a normal pattern this cannot tell apart), and set `within_seconds` to the rough duration of one logical operation -- an HTTP request, one worker job. A window that is too wide merges neighbouring operations into a false report; one that is too narrow misses a slow loop whose every query waits on the network.
+
+- Each repeated statement is reported once per task, as a `logging` warning naming the call sites and the statement itself, collapsed to one line and truncated. `strict=True` raises `RepeatedQueryError` instead, which is what you want in CI.
+- Counting is per asyncio task, so a hundred concurrent handlers running the same query once each never trip it -- only a loop inside one of them does.
+- Detection is off unless a block is active, and the block cannot be nested: entering a second one raises `RuntimeError`.
 
 ## Example
 

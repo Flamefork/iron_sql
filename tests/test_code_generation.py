@@ -21,7 +21,7 @@ _NULLABLE_JSONB_METADATA_EXPR = (
 )
 
 
-def test_source_location_comments(test_project: ProjectBuilder) -> None:
+def test_source_locations(test_project: ProjectBuilder) -> None:
     test_project.set_queries_source(
         """\
 from typing import Any
@@ -38,11 +38,11 @@ q3 = testdb_sql("SELECT id FROM users")
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
     ).read_text()
 
-    see_lines = [
-        [int(x) for x in re.findall(r":(\d+)", comment)]
-        for comment in re.findall(r"# See: (.+)", generated)
+    location_lines = [
+        [int(x) for x in re.findall(r":(\d+)", locations)]
+        for locations in re.findall(r"_locations = (.+)", generated)
     ]
-    assert see_lines == [[4, 6], [5]]
+    assert location_lines == [[4, 6], [5]]
 
 
 def test_scanner_rejects_syntax_error(test_project: ProjectBuilder) -> None:
