@@ -4,6 +4,7 @@ import dataclasses
 import hashlib
 import importlib
 import io
+import json
 import keyword
 import logging
 import re
@@ -437,7 +438,12 @@ def generate_sql_module(  # noqa: PLR0913, PLR0914
     module_name = module_full_name.rsplit(".", maxsplit=1)[-1]
     sql_fn_name = f"{module_name}_sql"
 
-    queries, query_locations_by_name = collect_queries(src_path, sql_fn_name)
+    discovered = collect_queries(src_path, sql_fn_name)
+    queries = discovered.queries
+    query_locations_by_name = discovered.query_locations_by_name
+
+    if debug_path is not None:
+        write_skipped_dirs(debug_path, discovered.skipped)
 
     dsn_ref = ModuleExprRef.parse(dsn_expr)
     dsn = dsn_ref.evaluate(expected_type=str)
@@ -605,10 +611,9 @@ def generate_sql_module(  # noqa: PLR0913, PLR0914
     return changed
 
 
-def collect_queries(
-    src_path: Path, sql_fn_name: str
-) -> tuple[list["CodeQuery"], defaultdict[str, list[str]]]:
-    raw = list(find_all_queries(src_path, sql_fn_name))
+def collect_queries(src_path: Path, sql_fn_name: str) -> "DiscoveredQueries":
+    scanned = walk_scanned_tree(src_path)
+    raw = list(find_all_queries(src_path, scanned.files, sql_fn_name))
     validate_sql_has_single_row_type(raw)
     query_locations_by_name: defaultdict[str, list[str]] = defaultdict(list)
     first_occurrence: dict[str, CodeQuery] = {}
@@ -617,7 +622,28 @@ def collect_queries(
         if q.name not in first_occurrence:
             first_occurrence[q.name] = q
     queries = sorted(first_occurrence.values(), key=lambda q: (q.file, q.lineno))
-    return queries, query_locations_by_name
+    return DiscoveredQueries(
+        queries=queries,
+        query_locations_by_name=query_locations_by_name,
+        skipped=list(scanned.skipped),
+    )
+
+
+def write_skipped_dirs(debug_path: Path, skipped: list["SkippedDir"]) -> None:
+    # The directories the walk refused to enter, with the reason it did.
+    # Without this file, a tree left alone on purpose and a tree lost by the scan
+    # both appear as statements that are absent from the generated module.
+    #
+    # The report contains the path and the reason, but no details about contents.
+    # Counting files under a refused directory would perform the walk refused above.
+    debug_path.mkdir(parents=True, exist_ok=True)
+    (debug_path / "skipped_dirs.json").write_text(
+        json.dumps(
+            [{"location": entry.location, "reason": entry.reason} for entry in skipped],
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 def render_query_classes(queries: tuple["GeneratedQuerySpec", ...]) -> list[str]:
@@ -2081,6 +2107,27 @@ class CodeQuery:
 
 
 @dataclass(kw_only=True, frozen=True)
+class SkippedDir:
+    # A directory the walk refused to enter, with the reason it did.
+    # The record distinguishes a tree left alone on purpose from a lost tree.
+    location: str
+    reason: str
+
+
+@dataclass(kw_only=True, frozen=True)
+class ScannedTree:
+    files: tuple[Path, ...]
+    skipped: tuple[SkippedDir, ...]
+
+
+@dataclass(kw_only=True)
+class DiscoveredQueries:
+    queries: list[CodeQuery]
+    query_locations_by_name: defaultdict[str, list[str]]
+    skipped: list[SkippedDir]
+
+
+@dataclass(kw_only=True, frozen=True)
 class SQLEntity:
     resolver: TypeResolver
     explicit_name: str | None
@@ -2165,10 +2212,64 @@ def build_entities(
     return ordered_entities, query_result_types
 
 
+def _skip_reason(directory: Path) -> str | None:
+    # A hidden directory is a tool or VCS store, not source owned by the project.
+    # A directory with pyvenv.cfg is an environment installation (PEP 405).
+    # Check the name first so a hidden tree does not cause an unnecessary stat.
+    if directory.name.startswith("."):
+        return "hidden directory"
+    if (directory / "pyvenv.cfg").is_file():
+        return "virtual environment"
+    return None
+
+
+def walk_scanned_tree(src_path: Path) -> ScannedTree:
+    # Path.walk permits directory pruning before the scan reads a refused tree.
+    # With follow_symlinks=False, directory links arrive with the file names.
+    # Record those links without entering their targets, and scan file links as files.
+    #
+    # Only child directories pass through _skip_reason. The scan root can have any
+    # name because the caller explicitly selected it as the source root.
+    files: list[Path] = []
+    skipped: list[SkippedDir] = []
+    for directory, subdirs, names in src_path.walk():
+        kept: list[str] = []
+        for name in subdirs:
+            reason = _skip_reason(directory / name)
+            if reason is None:
+                kept.append(name)
+            else:
+                skipped.append(
+                    SkippedDir(
+                        location=str((directory / name).relative_to(src_path)),
+                        reason=reason,
+                    )
+                )
+        subdirs[:] = kept
+        for name in names:
+            path = directory / name
+            if path.is_symlink() and path.is_dir():
+                skipped.append(
+                    SkippedDir(
+                        location=str(path.relative_to(src_path)),
+                        reason="symbolic link",
+                    )
+                )
+            elif name.endswith(".py"):
+                files.append(path)
+
+    # Sort the full tree because a top-down walk yields root files before nested files.
+    # Every generated location and diagnosis inherits this canonical order.
+    return ScannedTree(
+        files=tuple(sorted(files)),
+        skipped=tuple(sorted(skipped, key=lambda entry: entry.location)),
+    )
+
+
 def find_fn_calls(
-    root_path: Path, fn_name: str
+    files: tuple[Path, ...], fn_name: str
 ) -> Iterator[tuple[Path, int, ast.Call]]:
-    for path in root_path.glob("**/*.py"):
+    for path in files:
         content = path.read_text(encoding="utf-8")
         if fn_name not in content:
             continue
@@ -2185,8 +2286,10 @@ def find_fn_calls(
                     pass
 
 
-def find_all_queries(src_path: Path, sql_fn_name: str) -> Iterator[CodeQuery]:
-    for file, lineno, node in find_fn_calls(src_path, sql_fn_name):
+def find_all_queries(
+    src_path: Path, files: tuple[Path, ...], sql_fn_name: str
+) -> Iterator[CodeQuery]:
+    for file, lineno, node in find_fn_calls(files, sql_fn_name):
         relative_path = file.relative_to(src_path)
 
         sql_arg = node.args[0]

@@ -64,6 +64,8 @@ A 1+N pattern is therefore never implicit: it is always a loop in your own code 
        src_path=Path("."),
    )
    ```
+   `src_path` is the root of the source scan. The scan does not enter dot-prefixed directories, virtual environments that contain `pyvenv.cfg`, or directory symlinks. These rules apply only to child directories, so `src_path` can have any name. All other directories are scanned, including directories without importable Python names.
+
    This writes `myapp/db/mydb.py` containing:
    - a connection pool singleton,
    - `*_connection()` and `*_transaction()` context managers,
@@ -79,7 +81,7 @@ A 1+N pattern is therefore never implicit: it is always a loop in your own code 
 - **Naming conventions.** Supply `to_pascal_fn` and `to_snake_fn` callables to control generated names.
 - **Connection settings.** `dsn_expr` and `pool_options_expr` are written verbatim into the generated module; point them at config variables, env var lookups, or function calls.
 - **Session settings and timeouts.** `PoolOptions["kwargs"]` reaches every pooled connection, so libpq `options` carries server-side settings: `{"kwargs": {"options": "-c statement_timeout=5000 -c lock_timeout=1000"}}`. `statement_timeout` bounds a single statement, not a query method: a `query_stream()` that iterates for longer than the timeout is unaffected, because `DECLARE` and each `FETCH` count separately. Consider `idle_in_transaction_session_timeout` alongside them to bound transactions that stay open while the application is busy elsewhere.
-- **Debug artifacts.** Pass `debug_path` to save sqlc inputs and outputs for inspection.
+- **Debug artifacts.** Pass `debug_path` to save sqlc inputs and outputs for inspection. The generator also writes each refused directory and its reason to `skipped_dirs.json`.
 
 ## Runtime Highlights
 - `ConnectionPool` opens lazily and reopens after `close()`, with `ContextVar`-based connection reuse for nested contexts.

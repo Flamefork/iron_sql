@@ -211,6 +211,7 @@ class ProjectBuilder:
         json_model_overrides: dict[str, str] | None = None,
         pool_options: dict[str, Any] | None = None,
         to_pascal_fn: Callable[[str], str] = alias_generators.to_pascal,
+        debug_path: Path | None = None,
     ) -> bool:
         config_lines = [f'DSN = "{self.dsn}"']
         if pool_options is not None:
@@ -238,6 +239,7 @@ class ProjectBuilder:
             type_overrides=type_overrides,
             json_model_overrides=json_model_overrides,
             to_pascal_fn=to_pascal_fn,
+            debug_path=debug_path,
         )
         target_path = self.src_path / f"{self.module_full_name.replace('.', '/')}.py"
         if target_path.exists():
@@ -251,11 +253,13 @@ class ProjectBuilder:
         type_overrides: dict[str, str] | None = None,
         json_model_overrides: dict[str, str] | None = None,
         pool_options: dict[str, Any] | None = None,
+        debug_path: Path | None = None,
     ) -> ModuleType:
         _, module = self.generate_checked(
             type_overrides=type_overrides,
             json_model_overrides=json_model_overrides,
             pool_options=pool_options,
+            debug_path=debug_path,
         )
         return module
 
@@ -266,12 +270,14 @@ class ProjectBuilder:
         json_model_overrides: dict[str, str] | None = None,
         pool_options: dict[str, Any] | None = None,
         to_pascal_fn: Callable[[str], str] = alias_generators.to_pascal,
+        debug_path: Path | None = None,
     ) -> tuple[bool, ModuleType]:
         changed = self.generate_no_import(
             type_overrides=type_overrides,
             json_model_overrides=json_model_overrides,
             pool_options=pool_options,
             to_pascal_fn=to_pascal_fn,
+            debug_path=debug_path,
         )
 
         return changed, self.import_generated()
