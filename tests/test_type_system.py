@@ -114,8 +114,8 @@ async def test_single_array_column_result_roundtrip(
     generated = (
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
     ).read_text()
-    assert "runtime.typed_array_row(int, not_null=True)" in generated
-    assert "runtime.typed_array_row(int, not_null=False)" in generated
+    assert "runtime.typed_array_row(builtins.int, not_null=True)" in generated
+    assert "runtime.typed_array_row(builtins.int, not_null=False)" in generated
 
     async with mod.testdb_connection() as conn:
         await conn.execute(
@@ -871,3 +871,28 @@ async def test_type_overrides_reject_unused_type_name(
         test_project.generate(type_overrides={"double precision": "float"})
 
     assert "float8" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("expression", ["bad-name", "missing.Type"])
+def test_type_overrides_reject_invalid_python_expression(
+    test_project: ProjectBuilder,
+    expression: str,
+) -> None:
+    test_project.add_query("q", "SELECT 1::float8 AS value")
+
+    with pytest.raises(ValueError, match="type_overrides expression"):
+        test_project.generate_no_import(type_overrides={"float8": expression})
+
+
+def test_type_overrides_qualify_builtin_names(
+    test_project: ProjectBuilder,
+) -> None:
+    test_project.add_query("q", "SELECT 1::int4 AS value")
+
+    changed, _ = test_project.generate_checked(type_overrides={"int4": "int"})
+    assert changed is True
+    generated = (
+        test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
+    ).read_text(encoding="utf-8")
+
+    assert "runtime.typed_scalar_row(builtins.int, not_null=True)" in generated

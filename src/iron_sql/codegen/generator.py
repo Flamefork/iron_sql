@@ -1,9 +1,15 @@
 import ast
+import builtins
 import dataclasses
 import hashlib
 import importlib
+import io
+import keyword
 import logging
 import re
+import symtable
+import tokenize
+import unicodedata
 import warnings
 from collections import defaultdict
 from collections.abc import Callable
@@ -19,6 +25,7 @@ from iron_sql.codegen.sqlc import Catalog
 from iron_sql.codegen.sqlc import Column
 from iron_sql.codegen.sqlc import Enum
 from iron_sql.codegen.sqlc import Query
+from iron_sql.codegen.sqlc import Schema
 from iron_sql.codegen.sqlc import SQLCResult
 from iron_sql.codegen.sqlc import run_sqlc
 from iron_sql.codegen.util import indent_block
@@ -28,12 +35,42 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(kw_only=True, frozen=True)
+class JSONModelRef:
+    module_path: str
+    class_path: str
+    alias: str
+    origin: str = dataclasses.field(compare=False, repr=False)
+
+    @property
+    def expression(self) -> str:
+        return f"{self.alias}.{self.class_path}"
+
+    @property
+    def import_statement(self) -> str:
+        return f"import {self.module_path} as {self.alias}"
+
+
+@dataclass(kw_only=True, frozen=True)
+class NameOrigin:
+    name: str
+    origin: str
+    locations: tuple[str, ...]
+
+
+@dataclass(kw_only=True, frozen=True)
+class ModuleImportSpec:
+    source: str
+    binding: str
+    origin: str
+
+
+@dataclass(kw_only=True, frozen=True)
 class ColumnSpec:
     name: str
     table: str
     py_type: str
     element_py_type: str | None = None
-    json_type: str | None = None
+    json_model: JSONModelRef | None = None
 
 
 _JSON_PARAM_DUMPERS = {
@@ -52,7 +89,7 @@ class ParamSpec:
     db_type: str
     not_null: bool
     is_array: bool
-    json_type: str | None = None
+    json_model: JSONModelRef | None = None
 
     def __post_init__(self) -> None:
         if self.db_type == "jsonb" and self.is_array:
@@ -63,9 +100,9 @@ class ParamSpec:
     def serialized_expr(self) -> str:
         expr = self.name
         wraps_value = False
-        if self.json_type:
+        if self.json_model is not None:
             dump_fn = _JSON_PARAM_DUMPERS[self.db_type]
-            expr = f"{dump_fn}({self.json_type}, {self.name})"
+            expr = f"{dump_fn}({self.json_model.expression}, {self.name})"
             wraps_value = True
         match self.db_type:
             case "json":
@@ -89,6 +126,9 @@ class UnknownSQLTypeWarning(UserWarning):
 class ModuleExprRef:
     module_name: str
     module_expr: str
+    import_names: tuple[str, ...]
+    module_bindings: tuple[str, ...]
+    source_spellings: tuple[str, ...]
 
     @classmethod
     def parse(cls, value: str) -> "ModuleExprRef":
@@ -96,22 +136,64 @@ class ModuleExprRef:
         if not sep:
             msg = f"module expression must be 'module:expr', got: {value!r}"
             raise ValueError(msg)
-        match = re.match(r"[A-Za-z_][A-Za-z0-9_]*", module_expr)
-        if match is None:
-            msg = f"module expression must start with identifier, got: {module_expr!r}"
-            raise ValueError(msg)
-        return cls(module_name=module_name, module_expr=module_expr)
+        issues = dotted_path_name_issues(
+            "module expression module path",
+            module_name,
+            f"module expression {value!r}",
+            (),
+        )
+        raise_generated_name_issues(issues)
+        try:
+            expression_source = f"_iron_sql_value = ({module_expr})"
+            compile(expression_source, "<module expression>", "exec")
+            parsed = ast.parse(module_expr, "<module expression>", mode="eval")
+            expression_table = symtable.symtable(
+                expression_source,
+                "<module expression>",
+                "exec",
+            )
+        except SyntaxError as exc:
+            msg = f"invalid module expression {module_expr!r}: {exc.msg}"
+            raise ValueError(msg) from exc
+        module_binding_spellings = tuple(
+            dict.fromkeys(module_expression_binding_spellings(parsed, module_expr))
+        )
+        module_binding_names = {
+            unicodedata.normalize("NFKC", name) for name in module_binding_spellings
+        }
+        external_reads = tuple(
+            dict.fromkeys(
+                name
+                for table in walk_symbol_tables(expression_table)
+                for name in expression_table_reads(table)
+                if name != "_iron_sql_value" and name not in module_binding_names
+            )
+        )
+        module = importlib.import_module(module_name)
+        module_imports = tuple(name for name in external_reads if name in vars(module))
+        source_spellings = tuple(
+            dict.fromkeys((
+                *module_binding_spellings,
+                *expression_name_spellings(parsed, module_expr, set(module_imports)),
+            ))
+        )
+        return cls(
+            module_name=module_name,
+            module_expr=module_expr,
+            import_names=module_imports,
+            module_bindings=module_binding_spellings,
+            source_spellings=source_spellings,
+        )
 
     @property
     def import_name(self) -> str:
-        match = re.match(r"[A-Za-z_][A-Za-z0-9_]*", self.module_expr)
-        if match is None:
+        if not self.import_names:
             msg = (
-                "module expression must start with identifier, "
-                f"got: {self.module_expr!r}"
+                f"module expression {self.module_expr!r} does not read a binding "
+                f"from {self.module_name!r}"
             )
             raise ValueError(msg)
-        return match.group()
+        return self.import_names[0]
 
     def evaluate[T](self, *, expected_type: type[T]) -> T:
         mod = importlib.import_module(self.module_name)
@@ -127,22 +209,22 @@ class ModuleExprRef:
 
 
 _SQL_TYPE_MAP: dict[str, str] = {
-    "bool": "bool",
-    "int2": "int",
-    "int4": "int",
-    "int8": "int",
-    "oid": "int",
-    "float4": "float",
-    "float8": "float",
+    "bool": "builtins.bool",
+    "int2": "builtins.int",
+    "int4": "builtins.int",
+    "int8": "builtins.int",
+    "oid": "builtins.int",
+    "float4": "builtins.float",
+    "float8": "builtins.float",
     "numeric": "decimal.Decimal",
-    "varchar": "str",
-    "text": "str",
-    "bpchar": "str",
-    "char": "str",
-    "name": "str",
-    "bytea": "bytes",
-    "json": "object",
-    "jsonb": "object",
+    "varchar": "builtins.str",
+    "text": "builtins.str",
+    "bpchar": "builtins.str",
+    "char": "builtins.str",
+    "name": "builtins.str",
+    "bytea": "builtins.bytes",
+    "json": "builtins.object",
+    "jsonb": "builtins.object",
     "inet": "ipaddress.IPv4Address | ipaddress.IPv6Address | ipaddress.IPv4Interface | ipaddress.IPv6Interface",  # noqa: E501
     "cidr": "ipaddress.IPv4Network | ipaddress.IPv6Network",
     "date": "datetime.date",
@@ -152,8 +234,8 @@ _SQL_TYPE_MAP: dict[str, str] = {
     "timestamptz": "datetime.datetime",
     "interval": "datetime.timedelta",
     "uuid": "uuid.UUID",
-    "any": "object",
-    "anyelement": "object",
+    "any": "builtins.object",
+    "anyelement": "builtins.object",
 }
 
 
@@ -179,20 +261,20 @@ class TypeResolver:
     to_pascal_fn: Callable[[str], str]
     to_snake_fn: Callable[[str], str]
     type_overrides: dict[str, str]
-    json_column_type_overrides: dict[tuple[str, str], str]
+    json_column_type_overrides: dict[tuple[str, str], JSONModelRef]
 
     def column_spec(self, column: Column) -> ColumnSpec:
-        _, py_type, element_py_type, json_type = self._resolve(column)
+        _, py_type, element_py_type, json_model = self._resolve(column)
         return ColumnSpec(
             name=column.name,
             table=column.table.name if column.table else "unknown",
             py_type=py_type,
             element_py_type=element_py_type,
-            json_type=json_type,
+            json_model=json_model,
         )
 
     def param_spec(self, column: Column, name: str, *, is_named: bool) -> ParamSpec:
-        db_type, py_type, _, json_type = self._resolve(column)
+        db_type, py_type, _, json_model = self._resolve(column)
         return ParamSpec(
             name=name,
             py_type=py_type,
@@ -200,29 +282,31 @@ class TypeResolver:
             db_type=db_type,
             not_null=column.not_null,
             is_array=column.is_array,
-            json_type=json_type,
+            json_model=json_model,
         )
 
-    def _resolve(self, column: Column) -> tuple[str, str, str | None, str | None]:
+    def _resolve(
+        self, column: Column
+    ) -> tuple[str, str, str | None, JSONModelRef | None]:
         db_type = canonical_type_name(column, self.catalog)
 
-        json_type = None
+        json_model = None
         if column.table is not None:
             col_name = column.original_name or column.name
-            json_type = self.json_column_type_overrides.get((
+            json_model = self.json_column_type_overrides.get((
                 column.table.name,
                 col_name,
             ))
 
-        if json_type:
-            py_type = json_type
+        if json_model is not None:
+            py_type = json_model.expression
         elif db_type in self.type_overrides:
             py_type = self.type_overrides[db_type]
         elif self.catalog.schema_by_ref(column.type).has_enum(db_type):
             py_type = (
                 self.to_pascal_fn(f"{self.module_name}_{self.to_snake_fn(db_type)}")
                 if self.module_name
-                else "str"
+                else "builtins.str"
             )
         elif db_type in _SQL_TYPE_MAP:
             py_type = _SQL_TYPE_MAP[db_type]
@@ -232,7 +316,7 @@ class TypeResolver:
                 category=UnknownSQLTypeWarning,
                 stacklevel=1,
             )
-            py_type = "object"
+            py_type = "builtins.object"
 
         element_py_type = None
         if column.is_array:
@@ -242,7 +326,7 @@ class TypeResolver:
         if not column.not_null:
             py_type += " | None"
 
-        return db_type, py_type, element_py_type, json_type
+        return db_type, py_type, element_py_type, json_model
 
 
 def all_columns(sqlc_res: SQLCResult) -> Iterator[Column]:
@@ -277,6 +361,44 @@ def validate_type_overrides(overrides: dict[str, str], sqlc_res: SQLCResult) -> 
             f"{', '.join(unused)}; types in use: {', '.join(sorted(used_types))}"
         )
         raise ValueError(msg)
+
+
+class BuiltinNameQualifier(ast.NodeTransformer):
+    def visit_Name(self, node: ast.Name) -> ast.expr:
+        if isinstance(node.ctx, ast.Load) and hasattr(builtins, node.id):
+            return ast.copy_location(
+                ast.Attribute(
+                    value=ast.Name(id="builtins", ctx=ast.Load()),
+                    attr=node.id,
+                    ctx=node.ctx,
+                ),
+                node,
+            )
+        return node
+
+
+def normalize_type_override_expression(expression: str) -> str:
+    try:
+        parsed = ast.parse(expression, mode="eval")
+    except SyntaxError as exc:
+        msg = f"invalid type_overrides expression {expression!r}: {exc.msg}"
+        raise ValueError(msg) from exc
+    normalized = BuiltinNameQualifier().visit(parsed)
+    ast.fix_missing_locations(normalized)
+    roots = {
+        node.id
+        for node in ast.walk(normalized)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    }
+    available = {spec.binding for spec in _FIXED_MODULE_IMPORT_SPECS}
+    unavailable = sorted(roots - available)
+    if unavailable:
+        msg = (
+            f"type_overrides expression {expression!r} reads unavailable generated "
+            f"module bindings: {', '.join(unavailable)}"
+        )
+        raise ValueError(msg)
+    return ast.unparse(normalized)
 
 
 def map_sqlc_error(
@@ -340,9 +462,13 @@ def generate_sql_module(  # noqa: PLR0913, PLR0914
         logger.error(f"Error running SQLC:\n{mapped}")
         return False
 
-    validate_type_overrides(type_overrides or {}, sqlc_res)
+    normalized_type_overrides = {
+        db_type: normalize_type_override_expression(expression)
+        for db_type, expression in (type_overrides or {}).items()
+    }
+    validate_type_overrides(normalized_type_overrides, sqlc_res)
 
-    json_import_block, json_column_type_overrides = resolve_json_model_overrides(
+    json_models, json_column_type_overrides = resolve_json_model_overrides(
         json_model_overrides or {}, sqlc_res.catalog
     )
 
@@ -351,7 +477,7 @@ def generate_sql_module(  # noqa: PLR0913, PLR0914
         module_name=module_name,
         to_pascal_fn=to_pascal_fn,
         to_snake_fn=to_snake_fn,
-        type_overrides=type_overrides or {},
+        type_overrides=normalized_type_overrides,
         json_column_type_overrides=json_column_type_overrides,
     )
 
@@ -362,46 +488,105 @@ def generate_sql_module(  # noqa: PLR0913, PLR0914
         resolver,
     )
 
-    entities = sorted(render_entity(e.name, e.column_specs) for e in ordered_entities)
+    query_params_by_name = {
+        query.name: deduplicate_params([
+            resolver.param_spec(
+                param.column,
+                param.column.name or f"param_{param.number}",
+                is_named=param.column.is_named_param,
+            )
+            for param in query.params
+        ])
+        for query in sqlc_res.queries
+    }
+    query_result_columns_by_name = {
+        query.name: tuple(resolver.column_spec(column) for column in query.columns)
+        for query in sqlc_res.queries
+    }
+    code_queries_by_name = {query.name: query for query in queries}
+    query_render_specs_by_name = {
+        query.name: build_query_class_render_spec(
+            code_queries_by_name[query.name].class_name,
+            query.text,
+            query_params_by_name[query.name],
+            query_result_types[query.name],
+            query_result_columns_by_name[query.name],
+            tuple(query_locations_by_name[query.name]),
+        )
+        for query in sqlc_res.queries
+    }
 
     used_enums = collect_used_enums(sqlc_res)
 
-    enum_specs = [
-        (schema, e)
+    enum_specs = tuple(
+        EnumSpec(
+            schema=schema,
+            enum=enum,
+            class_name=enum_class_name(
+                enum.name,
+                module_name,
+                to_pascal_fn,
+                to_snake_fn,
+            ),
+            members=tuple(prepare_enum_members(enum, to_snake_fn)),
+        )
         for schema in sqlc_res.catalog.schemas
-        for e in schema.enums
-        if (schema.name, e.name) in used_enums
-    ]
+        for enum in schema.enums
+        if (schema.name, enum.name) in used_enums
+    )
+    query_order = {query.name: index for index, query in enumerate(queries)}
+    query_specs = tuple(
+        GeneratedQuerySpec(
+            source=code_queries_by_name[query.name],
+            sql=query.text,
+            result_type=query_result_types[query.name],
+            result_columns=query_result_columns_by_name[query.name],
+            render_spec=query_render_specs_by_name[query.name],
+            locations=tuple(query_locations_by_name[query.name]),
+        )
+        for query in sorted(sqlc_res.queries, key=lambda item: query_order[item.name])
+    )
+    module_spec = GeneratedModuleSpec(
+        module_full_name=module_full_name,
+        module_name=module_name,
+        sql_fn_name=sql_fn_name,
+        dsn_ref=dsn_ref,
+        pool_options_ref=pool_options_ref,
+        json_models=json_models,
+        imports=build_module_import_specs(dsn_ref, pool_options_ref, json_models),
+        queries=query_specs,
+        entities=tuple(ordered_entities),
+        enums=enum_specs,
+    )
+    validate_generated_names(module_spec)
+
+    entities = sorted(render_entity(e.name, e.column_specs) for e in ordered_entities)
 
     enums = sorted(
-        render_enum_class(e, module_name, to_pascal_fn, to_snake_fn)
-        for _, e in enum_specs
+        render_enum_class(enum.class_name, list(enum.members)) for enum in enum_specs
     )
 
     enum_registry = sorted(
         (
-            Identifier(schema.name, e.name).as_string(None),
-            enum_class_name(e.name, module_name, to_pascal_fn, to_snake_fn),
+            Identifier(enum.schema.name, enum.enum.name).as_string(None),
+            enum.class_name,
         )
-        for schema, e in enum_specs
+        for enum in enum_specs
     )
 
-    query_classes = render_query_classes(
-        sqlc_res.queries, queries, resolver, query_result_types, query_locations_by_name
-    )
+    query_classes = render_query_classes(query_specs)
 
     query_overloads = [
-        render_query_overload(sql_fn_name, q.name, q.sql, q.row_type) for q in queries
+        render_query_overload(sql_fn_name, q.class_name, q.sql, q.row_type)
+        for q in queries
     ]
 
-    query_dict_entries = [render_query_dict_entry(q.name, q.sql) for q in queries]
+    query_dict_entries = [render_query_dict_entry(q.class_name, q.sql) for q in queries]
 
     target_module_path = src_path / f"{module_full_name.replace('.', '/')}.py"
 
     new_content = render_module(
-        dsn_ref,
-        module_name,
-        sql_fn_name,
+        module_spec,
         entities,
         enums,
         enum_registry,
@@ -409,8 +594,10 @@ def generate_sql_module(  # noqa: PLR0913, PLR0914
         query_overloads,
         query_dict_entries,
         application_name,
-        json_import_block,
-        pool_options_ref,
+    )
+    validate_rendered_module(
+        new_content,
+        target_module_path,
     )
     changed = write_if_changed(target_module_path, new_content + "\n")
     if changed:
@@ -433,39 +620,15 @@ def collect_queries(
     return queries, query_locations_by_name
 
 
-def render_query_classes(
-    sqlc_queries: tuple[Query, ...],
-    queries: list["CodeQuery"],
-    resolver: TypeResolver,
-    query_result_types: dict[str, str],
-    query_locations_by_name: defaultdict[str, list[str]],
-) -> list[str]:
-    query_order = {q.name: i for i, q in enumerate(queries)}
-    return [
-        render_query_class(
-            q.name,
-            q.text,
-            [
-                resolver.param_spec(
-                    p.column,
-                    p.column.name or f"param_{p.number}",
-                    is_named=p.column.is_named_param,
-                )
-                for p in q.params
-            ],
-            query_result_types[q.name],
-            tuple(resolver.column_spec(column) for column in q.columns),
-            query_locations_by_name[q.name],
-        )
-        for q in sorted(sqlc_queries, key=lambda q: query_order[q.name])
-    ]
+def render_query_classes(queries: tuple["GeneratedQuerySpec", ...]) -> list[str]:
+    return [render_query_class_spec(query.render_spec) for query in queries]
 
 
 def resolve_json_model_overrides(
     overrides: dict[str, str], catalog: Catalog
-) -> tuple[str, dict[tuple[str, str], str]]:
+) -> tuple[tuple[JSONModelRef, ...], dict[tuple[str, str], JSONModelRef]]:
     if not overrides:
-        return "", {}
+        return (), {}
 
     json_compatible_types = set(_JSON_PARAM_DUMPERS)
     col_types = {
@@ -476,7 +639,7 @@ def resolve_json_model_overrides(
     }
     tables = {table for table, _ in col_types}
 
-    parsed: dict[tuple[str, str], tuple[str, str]] = {}
+    parsed: dict[tuple[str, str], tuple[str, str, str]] = {}
     for key, import_path in overrides.items():
         table_name, sep, col_name = key.partition(".")
         if not sep:
@@ -510,18 +673,883 @@ def resolve_json_model_overrides(
             )
             raise ValueError(msg)
 
-        parsed[table_name, col_name] = (module_path, class_name)
+        origin = f"json_model_overrides[{key!r}] = {import_path!r}"
+        parsed[table_name, col_name] = (module_path, class_name, origin)
 
-    modules = sorted({module for module, _ in parsed.values()})
-    import_block = "\n" + "\n".join(f"import {m}" for m in modules)
-    col_overrides = {key: f"{module}.{cls}" for key, (module, cls) in parsed.items()}
-    return import_block, col_overrides
+    import_paths = sorted({(module, cls) for module, cls, _ in parsed.values()})
+    origins_by_path: defaultdict[tuple[str, str], list[str]] = defaultdict(list)
+    for module_path, class_path, origin in parsed.values():
+        origins_by_path[module_path, class_path].append(origin)
+    refs_by_path = {
+        (module_path, class_path): JSONModelRef(
+            module_path=module_path,
+            class_path=class_path,
+            alias=f"_iron_sql_json_{index}",
+            origin="; ".join(origins_by_path[module_path, class_path]),
+        )
+        for index, (module_path, class_path) in enumerate(import_paths)
+    }
+    column_refs = {
+        key: refs_by_path[module_path, class_path]
+        for key, (module_path, class_path, _) in parsed.items()
+    }
+    return tuple(refs_by_path[path] for path in import_paths), column_refs
 
 
-def render_module(  # noqa: PLR0913, PLR0917
+_FIXED_MODULE_IMPORT_SPECS = (
+    ModuleImportSpec(
+        source="import builtins", binding="builtins", origin="generated import builtins"
+    ),
+    ModuleImportSpec(
+        source="import datetime", binding="datetime", origin="generated import datetime"
+    ),
+    ModuleImportSpec(
+        source="import decimal", binding="decimal", origin="generated import decimal"
+    ),
+    ModuleImportSpec(
+        source="import ipaddress",
+        binding="ipaddress",
+        origin="generated import ipaddress",
+    ),
+    ModuleImportSpec(
+        source="import uuid", binding="uuid", origin="generated import uuid"
+    ),
+    ModuleImportSpec(
+        source="from collections.abc import AsyncGenerator",
+        binding="AsyncGenerator",
+        origin="generated import AsyncGenerator",
+    ),
+    ModuleImportSpec(
+        source="from collections.abc import AsyncIterator",
+        binding="AsyncIterator",
+        origin="generated import AsyncIterator",
+    ),
+    ModuleImportSpec(
+        source="from collections.abc import Sequence",
+        binding="Sequence",
+        origin="generated import Sequence",
+    ),
+    ModuleImportSpec(
+        source="from contextlib import AbstractAsyncContextManager",
+        binding="AbstractAsyncContextManager",
+        origin="generated import AbstractAsyncContextManager",
+    ),
+    ModuleImportSpec(
+        source="from contextlib import asynccontextmanager",
+        binding="asynccontextmanager",
+        origin="generated import asynccontextmanager",
+    ),
+    ModuleImportSpec(
+        source="from contextvars import ContextVar",
+        binding="ContextVar",
+        origin="generated import ContextVar",
+    ),
+    ModuleImportSpec(
+        source="from dataclasses import dataclass",
+        binding="dataclass",
+        origin="generated import dataclass",
+    ),
+    ModuleImportSpec(
+        source="from enum import StrEnum",
+        binding="StrEnum",
+        origin="generated import StrEnum",
+    ),
+    ModuleImportSpec(
+        source="from typing import Any", binding="Any", origin="generated import Any"
+    ),
+    ModuleImportSpec(
+        source="from typing import Literal",
+        binding="Literal",
+        origin="generated import Literal",
+    ),
+    ModuleImportSpec(
+        source="from typing import overload",
+        binding="overload",
+        origin="generated import overload",
+    ),
+    ModuleImportSpec(
+        source="import psycopg", binding="psycopg", origin="generated psycopg imports"
+    ),
+    ModuleImportSpec(
+        source="import psycopg.rows",
+        binding="psycopg",
+        origin="generated psycopg imports",
+    ),
+    ModuleImportSpec(
+        source="import psycopg.sql",
+        binding="psycopg",
+        origin="generated psycopg imports",
+    ),
+    ModuleImportSpec(
+        source="import psycopg.types.json",
+        binding="psycopg",
+        origin="generated psycopg imports",
+    ),
+    ModuleImportSpec(
+        source="from iron_sql import runtime",
+        binding="runtime",
+        origin="generated import runtime",
+    ),
+)
+
+_QUERY_METHOD_EXTERNAL_READS: dict[str, tuple[str, ...]] = {
+    "execute": (),
+    "query_all_rows": (),
+    "query_single_row": ("runtime",),
+    "query_optional_row": ("runtime",),
+    "query_stream": (),
+}
+
+
+def query_method_required_external_reads(method_name: str) -> tuple[str, ...]:
+    return _QUERY_METHOD_EXTERNAL_READS[method_name]
+
+
+def is_query_method_external_read(name: str) -> bool:
+    return (
+        name in {"runtime", "psycopg"}
+        or re.fullmatch(r"_iron_sql_json_[0-9]+", name) is not None
+    )
+
+
+def build_module_import_specs(
     dsn_ref: ModuleExprRef,
+    pool_options_ref: ModuleExprRef | None,
+    json_models: tuple[JSONModelRef, ...],
+) -> tuple[ModuleImportSpec, ...]:
+    specs = list(_FIXED_MODULE_IMPORT_SPECS)
+    for ref, label in (
+        (dsn_ref, "dsn expression import"),
+        (pool_options_ref, "pool options expression import"),
+    ):
+        if ref is None:
+            continue
+        specs.extend(
+            ModuleImportSpec(
+                source=f"from {ref.module_name} import {name}",
+                binding=name,
+                origin=f"{label} from {ref.module_name}:{name}",
+            )
+            for name in ref.import_names
+        )
+    specs.extend(
+        ModuleImportSpec(
+            source=model.import_statement,
+            binding=model.alias,
+            origin=f"JSON model import {model.module_path!r}",
+        )
+        for model in json_models
+    )
+    merged: dict[tuple[str, str], ModuleImportSpec] = {}
+    for spec in specs:
+        key = (spec.source, spec.binding)
+        previous = merged.get(key)
+        if previous is None:
+            merged[key] = spec
+            continue
+        origins = tuple(dict.fromkeys((previous.origin, spec.origin)))
+        merged[key] = dataclasses.replace(previous, origin="; ".join(origins))
+    return tuple(merged.values())
+
+
+@dataclass(kw_only=True, frozen=True)
+class FunctionScopeSpec:
+    class_name: str
+    function_name: str
+    parameters: tuple[NameOrigin, ...]
+    locals: tuple[NameOrigin, ...]
+    external_reads: tuple[NameOrigin, ...]
+
+    @property
+    def label(self) -> str:
+        return f"method {self.class_name}.{self.function_name}"
+
+
+@dataclass(kw_only=True, frozen=True)
+class ClassBodyStepSpec:
+    source: str
+    binding: NameOrigin
+    eager_reads: tuple[NameOrigin, ...]
+    function_scope: FunctionScopeSpec | None = None
+
+
+@dataclass(kw_only=True, frozen=True)
+class QueryClassRenderSpec:
+    class_name: str
+    result_type: str
+    locations: tuple[str, ...]
+    steps: tuple[ClassBodyStepSpec, ...]
+
+
+@dataclass(kw_only=True, frozen=True)
+class EnumSpec:
+    schema: Schema
+    enum: Enum
+    class_name: str
+    members: tuple[tuple[str, str], ...]
+
+
+@dataclass(kw_only=True, frozen=True)
+class GeneratedQuerySpec:
+    source: "CodeQuery"
+    sql: str
+    result_type: str
+    result_columns: tuple[ColumnSpec, ...]
+    render_spec: QueryClassRenderSpec
+    locations: tuple[str, ...]
+
+
+@dataclass(kw_only=True, frozen=True)
+class GeneratedModuleSpec:
+    module_full_name: str
+    module_name: str
+    sql_fn_name: str
+    dsn_ref: ModuleExprRef
+    pool_options_ref: ModuleExprRef | None
+    json_models: tuple[JSONModelRef, ...]
+    imports: tuple[ModuleImportSpec, ...]
+    queries: tuple[GeneratedQuerySpec, ...]
+    entities: tuple["SQLEntity", ...]
+    enums: tuple[EnumSpec, ...]
+
+    @property
+    def all_locations(self) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                location for query in self.queries for location in query.locations
+            )
+        )
+
+
+def query_method_external_reads(
+    method_name: str, query_params: list[ParamSpec]
+) -> tuple[str, ...]:
+    reads = set(query_method_required_external_reads(method_name))
+    for param in query_params:
+        if param.json_model is not None:
+            reads.add("runtime")
+            reads.add(param.json_model.alias)
+        if param.db_type in {"json", "jsonb"}:
+            reads.add("psycopg")
+    return tuple(sorted(reads))
+
+
+def name_claim_issues(
+    scope: str,
+    claims: list[NameOrigin],
+    *,
+    class_name: str | None = None,
+) -> list[tuple[str, str, str]]:
+    issues: list[tuple[str, str, str]] = []
+    claims_by_name: defaultdict[str, list[NameOrigin]] = defaultdict(list)
+    for claim in claims:
+        name = claim.name
+        normalized_name = unicodedata.normalize("NFKC", name)
+        binding_name = (
+            mangle_class_name(class_name, normalized_name)
+            if class_name is not None
+            else normalized_name
+        )
+        claims_by_name[binding_name].append(claim)
+
+        context = (
+            f"origin: {claim.origin}; SQL call sites: "
+            f"{', '.join(claim.locations) or 'none'}"
+        )
+        if not name.isidentifier():
+            issues.append((
+                scope,
+                binding_name,
+                f"{scope}: {name!r} is not a valid Python identifier; {context}",
+            ))
+        elif keyword.iskeyword(normalized_name):
+            if name == normalized_name:
+                description = f"{name!r} is a Python keyword"
+            else:
+                description = (
+                    f"{name!r} normalizes to Python keyword {normalized_name!r}"
+                )
+            issues.append((
+                scope,
+                binding_name,
+                f"{scope}: {description}; {context}",
+            ))
+        elif name != normalized_name:
+            description = f"{name!r} is normalized by Python to {normalized_name!r}"
+            issues.append((
+                scope,
+                binding_name,
+                f"{scope}: {description}; {context}",
+            ))
+        elif name != binding_name:
+            description = f"{name!r} is mangled by Python to {binding_name!r}"
+            issues.append((
+                scope,
+                binding_name,
+                f"{scope}: {description}; {context}",
+            ))
+
+    for binding_name, name_claims in claims_by_name.items():
+        origins = "; ".join(claim.origin for claim in name_claims)
+        locations = tuple(
+            dict.fromkeys(
+                location for claim in name_claims for location in claim.locations
+            )
+        )
+        location_text = ", ".join(locations) or "none"
+        context = f"origins: {origins}; SQL call sites: {location_text}"
+        if len(name_claims) > 1:
+            spellings = tuple(dict.fromkeys(claim.name for claim in name_claims))
+            if len(spellings) == 1:
+                description = f"{spellings[0]!r} is claimed more than once"
+            else:
+                rendered_spellings = ", ".join(repr(name) for name in spellings)
+                description = (
+                    f"{rendered_spellings} resolve to Python binding {binding_name!r}"
+                )
+            issues.append((
+                scope,
+                binding_name,
+                f"{scope}: {description}; {context}",
+            ))
+    return issues
+
+
+def mangle_class_name(class_name: str, name: str) -> str:
+    if not name.startswith("__") or name.endswith("__"):
+        return name
+    normalized_class_name = unicodedata.normalize("NFKC", class_name).lstrip("_")
+    if not normalized_class_name:
+        return name
+    return f"_{normalized_class_name}{name}"
+
+
+def dotted_path_name_issues(
+    scope: str,
+    path: str,
+    origin: str,
+    locations: tuple[str, ...],
+) -> list[tuple[str, str, str]]:
+    return [
+        issue
+        for index, component in enumerate(path.split("."), start=1)
+        for issue in name_claim_issues(
+            f"{scope} component {index}",
+            [NameOrigin(name=component, origin=origin, locations=locations)],
+        )
+    ]
+
+
+def raise_generated_name_issues(issues: list[tuple[str, str, str]]) -> None:
+    if not issues:
+        return
+    details = "\n".join(f"- {message}" for _, _, message in sorted(issues))
+    msg = f"Invalid generated Python names:\n{details}"
+    raise ValueError(msg)
+
+
+def module_binding_claims(
+    *,
     module_name: str,
     sql_fn_name: str,
+    imports: tuple[ModuleImportSpec, ...],
+    dsn_ref: ModuleExprRef,
+    pool_options_ref: ModuleExprRef | None,
+    has_enums: bool,
+    locations: tuple[str, ...],
+) -> list[NameOrigin]:
+    claims = [
+        NameOrigin(
+            name=binding,
+            origin=origin,
+            locations=locations,
+        )
+        for binding, origin in dict.fromkeys(
+            (spec.binding, spec.origin) for spec in imports
+        )
+    ]
+    claims.extend(
+        NameOrigin(
+            name=name,
+            origin=f"binding created by dsn expression {dsn_ref.module_expr!r}",
+            locations=locations,
+        )
+        for name in dsn_ref.module_bindings
+    )
+    if pool_options_ref is not None:
+        claims.extend(
+            NameOrigin(
+                name=name,
+                origin=(
+                    "binding created by pool options expression "
+                    f"{pool_options_ref.module_expr!r}"
+                ),
+                locations=locations,
+            )
+            for name in pool_options_ref.module_bindings
+        )
+    claims.extend(
+        NameOrigin(
+            name=name,
+            origin="implicit module binding created by Python import machinery",
+            locations=locations,
+        )
+        for name in (
+            "__annotations__",
+            "__builtins__",
+            "__cached__",
+            "__doc__",
+            "__file__",
+            "__loader__",
+            "__name__",
+            "__package__",
+            "__spec__",
+        )
+    )
+    claims.extend(
+        NameOrigin(name=name, origin=origin, locations=locations)
+        for name, origin in (
+            (f"{module_name.upper()}_POOL", "generated connection pool"),
+            (
+                f"_{module_name}_connection",
+                "generated connection context variable",
+            ),
+            (f"{module_name}_connection", "generated connection helper"),
+            (f"{module_name}_transaction", "generated transaction helper"),
+            (f"{module_name}_listen_session", "generated listen helper"),
+            (f"{module_name}_notify", "generated notify helper"),
+            ("Query", "generated query base class"),
+            ("_QUERIES", "generated query registry"),
+            (sql_fn_name, "generated SQL lookup function"),
+        )
+    )
+    if has_enums:
+        claims.append(
+            NameOrigin(
+                name="ENUM_TYPES",
+                origin="generated enum registry",
+                locations=locations,
+            )
+        )
+    return claims
+
+
+def query_method_scope_specs(
+    class_name: str,
+    query_params: list[ParamSpec],
+    result_columns: tuple[ColumnSpec, ...],
+    locations: tuple[str, ...],
+) -> tuple[FunctionScopeSpec, ...]:
+    method_names = (
+        (
+            "query_all_rows",
+            "query_single_row",
+            "query_optional_row",
+            "query_stream",
+        )
+        if result_columns
+        else ("execute",)
+    )
+    cursor_methods = {
+        "query_all_rows",
+        "query_single_row",
+        "query_optional_row",
+    }
+    return tuple(
+        FunctionScopeSpec(
+            class_name=class_name,
+            function_name=method_name,
+            parameters=(
+                NameOrigin(
+                    name="self",
+                    origin="generated method receiver",
+                    locations=locations,
+                ),
+                *(
+                    NameOrigin(
+                        name=param.name,
+                        origin=f"query parameter {index}",
+                        locations=locations,
+                    )
+                    for index, param in enumerate(query_params, start=1)
+                ),
+            ),
+            locals=(
+                (
+                    NameOrigin(
+                        name="cur",
+                        origin="generated cursor local",
+                        locations=locations,
+                    ),
+                )
+                if method_name in cursor_methods
+                else ()
+            ),
+            external_reads=tuple(
+                NameOrigin(
+                    name=name,
+                    origin="generated method body external read",
+                    locations=locations,
+                )
+                for name in query_method_external_reads(method_name, query_params)
+            ),
+        )
+        for method_name in method_names
+    )
+
+
+def function_scope_name_issues(
+    scope: FunctionScopeSpec,
+) -> list[tuple[str, str, str]]:
+    issues = name_claim_issues(
+        scope.label,
+        list(scope.parameters),
+        class_name=scope.class_name,
+    )
+    issues.extend(
+        name_claim_issues(
+            scope.label,
+            [*scope.locals, *scope.external_reads],
+            class_name=scope.class_name,
+        )
+    )
+    parameter_bindings = {
+        mangle_class_name(
+            scope.class_name,
+            unicodedata.normalize("NFKC", parameter.name),
+        ): parameter
+        for parameter in scope.parameters
+    }
+    local_bindings = {
+        mangle_class_name(
+            scope.class_name,
+            unicodedata.normalize("NFKC", local.name),
+        ): local
+        for local in scope.locals
+    }
+    for read in scope.external_reads:
+        binding_name = mangle_class_name(
+            scope.class_name,
+            unicodedata.normalize("NFKC", read.name),
+        )
+        shadow = parameter_bindings.get(binding_name) or local_bindings.get(
+            binding_name
+        )
+        if shadow is None:
+            continue
+        locations = tuple(dict.fromkeys((*shadow.locations, *read.locations)))
+        context = (
+            f"origins: {shadow.origin}; {read.origin}; SQL call sites: "
+            f"{', '.join(locations) or 'none'}"
+        )
+        issues.append((
+            scope.label,
+            binding_name,
+            f"{scope.label}: {read.name!r} is claimed more than once; {context}",
+        ))
+    return issues
+
+
+def query_class_render_name_issues(
+    spec: QueryClassRenderSpec,
+) -> list[tuple[str, str, str]]:
+    scope = f"class {spec.class_name!r}"
+    issues: list[tuple[str, str, str]] = []
+    previous_bindings: dict[str, NameOrigin] = {}
+    for step in spec.steps:
+        issues.extend(
+            name_claim_issues(
+                scope,
+                [step.binding],
+                class_name=spec.class_name,
+            )
+        )
+        for read in step.eager_reads:
+            binding_name = mangle_class_name(
+                spec.class_name,
+                unicodedata.normalize("NFKC", read.name),
+            )
+            shadow = previous_bindings.get(binding_name)
+            if shadow is None:
+                continue
+            locations = tuple(dict.fromkeys((*shadow.locations, *read.locations)))
+            context = (
+                f"origins: {shadow.origin}; {read.origin}; SQL call sites: "
+                f"{', '.join(locations) or 'none'}"
+            )
+            issues.append((
+                scope,
+                binding_name,
+                f"{scope}: {read.name!r} is claimed more than once; {context}",
+            ))
+        normalized_binding = unicodedata.normalize("NFKC", step.binding.name)
+        previous_bindings[mangle_class_name(spec.class_name, normalized_binding)] = (
+            step.binding
+        )
+        if step.function_scope is not None:
+            issues.extend(function_scope_name_issues(step.function_scope))
+    return issues
+
+
+def entity_name_analysis(
+    module: GeneratedModuleSpec,
+) -> tuple[list[NameOrigin], list[tuple[str, str, str]]]:
+    module_claims: list[NameOrigin] = []
+    issues: list[tuple[str, str, str]] = []
+    entity_locations_by_name: defaultdict[str, list[str]] = defaultdict(list)
+    for query in module.queries:
+        entity_locations_by_name[query.result_type].extend(query.locations)
+
+    for entity in module.entities:
+        locations = tuple(entity_locations_by_name[entity.name]) or module.all_locations
+        origin = (
+            f"generated query result entity for row_type {entity.explicit_name!r}"
+            if entity.explicit_name is not None
+            else f"generated entity for table {entity.table_name!r}"
+        )
+        module_claims.append(
+            NameOrigin(name=entity.name, origin=origin, locations=locations)
+        )
+        field_claims = [
+            NameOrigin(
+                name=column.name,
+                origin=f"generated result field {index}",
+                locations=locations,
+            )
+            for index, column in enumerate(entity.column_specs, start=1)
+        ]
+        issues.extend(
+            name_claim_issues(
+                f"class {entity.name!r}",
+                field_claims,
+                class_name=entity.name,
+            )
+        )
+        issues.extend(result_protocol_field_issues(entity.name, field_claims))
+    return module_claims, issues
+
+
+def result_protocol_field_issues(
+    class_name: str, field_claims: list[NameOrigin]
+) -> list[tuple[str, str, str]]:
+    issues: list[tuple[str, str, str]] = []
+    for field_claim in field_claims:
+        normalized_name = unicodedata.normalize("NFKC", field_claim.name)
+        if not (normalized_name.startswith("__") and normalized_name.endswith("__")):
+            continue
+        location_text = ", ".join(field_claim.locations) or "none"
+        description = f"{field_claim.name!r} is reserved for Python protocol attributes"
+        context = f"origin: {field_claim.origin}; SQL call sites: {location_text}"
+        scope = f"class {class_name!r}"
+        issues.append((
+            scope,
+            normalized_name,
+            f"{scope}: {description}; {context}",
+        ))
+    return issues
+
+
+def enum_name_analysis(
+    module: GeneratedModuleSpec,
+) -> tuple[list[NameOrigin], list[tuple[str, str, str]]]:
+    module_claims: list[NameOrigin] = []
+    issues: list[tuple[str, str, str]] = []
+    for enum in module.enums:
+        module_claims.append(
+            NameOrigin(
+                name=enum.class_name,
+                origin=f"generated enum for {enum.schema.name}.{enum.enum.name}",
+                locations=module.all_locations,
+            )
+        )
+        issues.extend(
+            name_claim_issues(
+                f"class {enum.class_name!r}",
+                [
+                    NameOrigin(
+                        name=name,
+                        origin=f"generated enum member for label {value!r}",
+                        locations=module.all_locations,
+                    )
+                    for name, value in enum.members
+                ],
+                class_name=enum.class_name,
+            )
+        )
+    return module_claims, issues
+
+
+def query_name_claims(module: GeneratedModuleSpec) -> list[NameOrigin]:
+    claims: list[NameOrigin] = []
+    for query in module.queries:
+        claims.append(
+            NameOrigin(
+                name=query.source.class_name,
+                origin=f"generated query class for {query.source.sql!r}",
+                locations=query.locations,
+            )
+        )
+        if query.source.row_type and query.result_type != query.source.row_type:
+            claims.append(
+                NameOrigin(
+                    name=query.source.row_type,
+                    origin=f"row_type for {query.source.sql!r}",
+                    locations=query.locations,
+                )
+            )
+    return claims
+
+
+def validate_generated_names(module: GeneratedModuleSpec) -> None:
+    issues: list[tuple[str, str, str]] = []
+
+    all_locations = module.all_locations
+    issues.extend(
+        dotted_path_name_issues(
+            "output module path",
+            module.module_full_name,
+            "module_full_name",
+            all_locations,
+        )
+    )
+    module_claims = module_binding_claims(
+        module_name=module.module_name,
+        sql_fn_name=module.sql_fn_name,
+        imports=module.imports,
+        dsn_ref=module.dsn_ref,
+        pool_options_ref=module.pool_options_ref,
+        has_enums=bool(module.enums),
+        locations=all_locations,
+    )
+    for ref, label in (
+        (module.dsn_ref, "dsn expression"),
+        (module.pool_options_ref, "pool options expression"),
+    ):
+        if ref is None:
+            continue
+        for spelling in ref.source_spellings:
+            issues.extend(
+                name_claim_issues(
+                    label,
+                    [
+                        NameOrigin(
+                            name=spelling,
+                            origin=f"module expression {ref.module_expr!r}",
+                            locations=all_locations,
+                        )
+                    ],
+                )
+            )
+    for json_model in module.json_models:
+        issues.extend(
+            dotted_path_name_issues(
+                "JSON model override module path",
+                json_model.module_path,
+                json_model.origin,
+                all_locations,
+            )
+        )
+        issues.extend(
+            dotted_path_name_issues(
+                "JSON model override class path",
+                json_model.class_path,
+                json_model.origin,
+                all_locations,
+            )
+        )
+
+    entity_claims, entity_issues = entity_name_analysis(module)
+    enum_claims, enum_issues = enum_name_analysis(module)
+    module_claims.extend(entity_claims)
+    module_claims.extend(enum_claims)
+    module_claims.extend(query_name_claims(module))
+    issues.extend(entity_issues)
+    issues.extend(enum_issues)
+
+    issues.extend(
+        name_claim_issues(f"module {module.module_full_name!r}", module_claims)
+    )
+
+    for query in module.queries:
+        issues.extend(query_class_render_name_issues(query.render_spec))
+
+    raise_generated_name_issues(issues)
+
+
+def validate_rendered_module(
+    source: str,
+    path: Path,
+) -> None:
+    try:
+        compile(source, path.as_posix(), "exec")
+    except SyntaxError as exc:
+        msg = f"Generated Python failed compiler preflight: {exc}"
+        raise RuntimeError(msg) from exc
+
+
+def walk_symbol_tables(
+    table: symtable.SymbolTable,
+) -> Iterator[symtable.SymbolTable]:
+    yield table
+    for child in table.get_children():
+        yield from walk_symbol_tables(child)
+
+
+def expression_table_reads(table: symtable.SymbolTable) -> tuple[str, ...]:
+    return tuple(
+        symbol.get_name()
+        for symbol in table.get_symbols()
+        if symbol.is_referenced()
+        and (symbol.is_global() or symbol.is_free())
+        and not symbol.is_assigned()
+        and not symbol.is_parameter()
+    )
+
+
+def module_expression_binding_spellings(
+    expression: ast.Expression,
+    source: str,
+) -> Iterator[str]:
+    def walk(node: ast.AST, *, nested_function: bool) -> Iterator[str]:
+        match node:
+            case ast.Lambda(args=args, body=body):
+                for default in (*args.defaults, *args.kw_defaults):
+                    if default is not None:
+                        yield from walk(default, nested_function=nested_function)
+                yield from walk(body, nested_function=True)
+            case ast.NamedExpr(target=ast.Name()) if not nested_function:
+                spelling = ast.get_source_segment(source, node.target)
+                if spelling is None:
+                    msg = f"Cannot recover module expression binding from {source!r}"
+                    raise RuntimeError(msg)
+                yield spelling
+                yield from walk(node.value, nested_function=nested_function)
+            case _:
+                for child in ast.iter_child_nodes(node):
+                    yield from walk(child, nested_function=nested_function)
+
+    yield from walk(expression.body, nested_function=False)
+
+
+def expression_name_spellings(
+    expression: ast.Expression,
+    source: str,
+    names: set[str],
+) -> Iterator[str]:
+    for node in ast.walk(expression):
+        if not isinstance(node, ast.Name) or not isinstance(node.ctx, ast.Load):
+            continue
+        if node.id not in names:
+            continue
+        spelling = ast.get_source_segment(source, node)
+        if spelling is None:
+            msg = f"Cannot recover module expression name from {source!r}"
+            raise RuntimeError(msg)
+        yield spelling
+
+
+def render_module(
+    module: GeneratedModuleSpec,
     entities: list[str],
     enums: list[str],
     enum_registry: list[tuple[str, str]],
@@ -529,25 +1557,20 @@ def render_module(  # noqa: PLR0913, PLR0917
     query_overloads: list[str],
     query_dict_entries: list[str],
     application_name: str | None = None,
-    json_import_block: str = "",
-    pool_options_ref: ModuleExprRef | None = None,
 ) -> str:
-    imports = [f"from {dsn_ref.module_name} import {dsn_ref.import_name}"]
+    dsn_ref = module.dsn_ref
+    module_name = module.module_name
+    sql_fn_name = module.sql_fn_name
+    pool_options_ref = module.pool_options_ref
     pool_args = [
         dsn_ref.module_expr,
         f'name="{module_name}"',
         f"application_name={application_name!r}",
     ]
     if pool_options_ref is not None:
-        imports.append(
-            f"from {pool_options_ref.module_name} import {pool_options_ref.import_name}"
-        )
         pool_args.append(f"pool_options={pool_options_ref.module_expr}")
 
-    if json_import_block:
-        imports.extend(json_import_block.strip().splitlines())
-
-    imports_block = "\n".join(imports)
+    imports_block = "\n".join(spec.source for spec in module.imports)
 
     pre_pool_blocks: list[str] = []
     if enums:
@@ -556,7 +1579,9 @@ def render_module(  # noqa: PLR0913, PLR0917
         registry_entries = ",\n    ".join(
             f"({pg_name!r}, {class_name})" for pg_name, class_name in enum_registry
         )
-        registry_type = "list[tuple[str, type[StrEnum]]]"
+        registry_type = (
+            "builtins.list[builtins.tuple[builtins.str, builtins.type[StrEnum]]]"
+        )
         pre_pool_blocks.append(
             f"ENUM_TYPES: {registry_type} = [\n    {registry_entries},\n]"
         )
@@ -573,29 +1598,6 @@ def render_module(  # noqa: PLR0913, PLR0917
 # pyright: reportUnusedImport=false
 # pyright: reportUnusedParameter=false
 # ruff: noqa
-
-import datetime
-import decimal
-import ipaddress
-import uuid
-from collections.abc import AsyncGenerator
-from collections.abc import AsyncIterator
-from collections.abc import Sequence
-from contextlib import AbstractAsyncContextManager
-from contextlib import asynccontextmanager
-from contextvars import ContextVar
-from dataclasses import dataclass
-from enum import StrEnum
-from typing import Any
-from typing import Literal
-from typing import overload
-
-import psycopg
-import psycopg.rows
-import psycopg.sql
-import psycopg.types.json
-
-from iron_sql import runtime
 
 {imports_block}
 
@@ -624,14 +1626,17 @@ async def {module_name}_transaction() -> AsyncGenerator[None]:
 
 @asynccontextmanager
 async def {module_name}_listen_session(
-    channel: str,
-) -> AsyncGenerator[AsyncGenerator[str]]:
+    channel: builtins.str,
+) -> AsyncGenerator[AsyncGenerator[builtins.str]]:
     async with {module_name.upper()}_POOL.connection() as conn:
         async with runtime.listen(conn, channel) as payloads:
             yield payloads
 
 
-async def {module_name}_notify(channel: str, payload: str = "") -> None:
+async def {module_name}_notify(
+    channel: builtins.str,
+    payload: builtins.str = "",
+) -> None:
     async with {module_name}_connection() as conn:
         await runtime.notify(conn, channel, payload)
 
@@ -640,27 +1645,30 @@ async def {module_name}_notify(channel: str, payload: str = "") -> None:
 
 
 class Query[T](runtime.Query[T]):
-    _connection_factory = staticmethod({module_name}_connection)
+    _connection_factory = builtins.staticmethod({module_name}_connection)
 
 
 {"\n\n\n".join(query_classes)}
 
 
-_QUERIES: dict[str, type[Query[Any]]] = {{
+_QUERIES: builtins.dict[builtins.str, builtins.type[Query[Any]]] = {{
     {(",\n    ").join(query_dict_entries)}
 }}
 
 
 {"\n".join(query_overloads)}
 @overload
-def {sql_fn_name}(sql: str) -> Query[Any]: ...
+def {sql_fn_name}(sql: builtins.str) -> Query[Any]: ...
 
 
-def {sql_fn_name}(sql: str, row_type: str | None = None) -> Query[Any]:
+def {sql_fn_name}(
+    sql: builtins.str,
+    row_type: builtins.str | None = None,
+) -> Query[Any]:
     if sql in _QUERIES:
         return _QUERIES[sql]()
     msg = f"Unknown statement: {{sql!r}}"
-    raise KeyError(msg)
+    raise builtins.KeyError(msg)
 
     """.strip()  # noqa: E501
 
@@ -674,14 +1682,11 @@ def enum_class_name(
     return to_pascal_fn(f"{module_name}_{to_snake_fn(enum_name)}")
 
 
-def render_enum_class(
+def prepare_enum_members(
     enum: Enum,
-    module_name: str,
-    to_pascal_fn: Callable[[str], str],
     to_snake_fn: Callable[[str], str],
-) -> str:
-    class_name = enum_class_name(enum.name, module_name, to_pascal_fn, to_snake_fn)
-    members: list[str] = []
+) -> list[tuple[str, str]]:
+    members: list[tuple[str, str]] = []
     seen_names: dict[str, int] = {}
 
     for val in enum.vals:
@@ -695,19 +1700,29 @@ def render_enum_class(
             name = f"{name}_{seen_names[name]}"
         else:
             seen_names[name] = 1
-        members.append(f'{name} = "{val}"')
+        members.append((name, val))
+
+    return members
+
+
+def render_enum_class(class_name: str, members: list[tuple[str, str]]) -> str:
+    rendered_members = "\n".join(f'{name} = "{value}"' for name, value in members)
 
     return f"""
 
 class {class_name}(StrEnum):
-    {indent_block("\n".join(members), "    ")}
+    {indent_block(rendered_members, "    ")}
 
     """.strip()
 
 
 def render_entity(name: str, columns: tuple[ColumnSpec, ...]) -> str:
     fields = "\n    ".join(f"{c.name}: {c.py_type}" for c in columns)
-    json_cols = [(c.name, c.json_type) for c in columns if c.json_type]
+    json_cols = [
+        (column.name, column.json_model.expression)
+        for column in columns
+        if column.json_model is not None
+    ]
     validated = ""
     if json_cols:
         args = ", ".join(f"{n}={jt}" for n, jt in json_cols)
@@ -741,9 +1756,170 @@ def render_query_class(
     result: str,
     result_columns: tuple[ColumnSpec, ...],
     locations: list[str],
+    *,
+    function_scopes: tuple[FunctionScopeSpec, ...] | None = None,
 ) -> str:
-    query_params = deduplicate_params(query_params)
+    spec = build_query_class_render_spec(
+        query_name,
+        sql,
+        query_params,
+        result,
+        result_columns,
+        tuple(locations),
+        function_scopes=function_scopes,
+    )
+    return render_query_class_spec(spec)
 
+
+def build_query_class_render_spec(
+    query_name: str,
+    sql: str,
+    query_params: list[ParamSpec],
+    result: str,
+    result_columns: tuple[ColumnSpec, ...],
+    locations: tuple[str, ...],
+    *,
+    function_scopes: tuple[FunctionScopeSpec, ...] | None = None,
+) -> QueryClassRenderSpec:
+    if function_scopes is None:
+        function_scopes = query_method_scope_specs(
+            query_name,
+            query_params,
+            result_columns,
+            locations,
+        )
+    params_arg, query_fn_signature = render_query_parameters(query_params)
+
+    row_factory = render_row_factory(result, result_columns)
+    parameter_type_expressions = tuple(param.py_type for param in query_params)
+
+    function_names = tuple(scope.function_name for scope in function_scopes)
+    method_sources: tuple[str, ...]
+    method_eager_expressions: tuple[tuple[str, ...], ...]
+    if function_names == (
+        "query_all_rows",
+        "query_single_row",
+        "query_optional_row",
+        "query_stream",
+    ):
+        cursor_name = function_scopes[0].locals[0].name
+        method_sources = (
+            "\n".join((
+                render_method_header(
+                    "query_all_rows",
+                    query_fn_signature,
+                    f"builtins.list[{result}]",
+                ),
+                f"    async with self._client_cursor({params_arg}) as {cursor_name}:",
+                f"        return await {cursor_name}.fetchall()",
+            )),
+            "\n".join((
+                render_method_header("query_single_row", query_fn_signature, result),
+                f"    async with self._client_cursor({params_arg}) as {cursor_name}:",
+                f"        return runtime.get_one_row(await {cursor_name}.fetchmany(2))",
+            )),
+            "\n".join((
+                render_method_header(
+                    "query_optional_row",
+                    query_fn_signature,
+                    f"{result.removesuffix(' | None')} | None",
+                ),
+                f"    async with self._client_cursor({params_arg}) as {cursor_name}:",
+                "        return {function}(await {cursor}.fetchmany(2))".format(
+                    function="runtime.get_one_row_or_none",
+                    cursor=cursor_name,
+                ),
+            )),
+            "\n".join((
+                render_method_header(
+                    "query_stream",
+                    query_fn_signature,
+                    f"AbstractAsyncContextManager[AsyncIterator[{result}]]",
+                    is_async=False,
+                ),
+                f"    return self._server_cursor({params_arg})",
+            )),
+        )
+        method_eager_expressions = (
+            (*parameter_type_expressions, f"builtins.list[{result}]"),
+            (*parameter_type_expressions, result),
+            (
+                *parameter_type_expressions,
+                f"{result.removesuffix(' | None')} | None",
+            ),
+            (
+                *parameter_type_expressions,
+                f"AbstractAsyncContextManager[AsyncIterator[{result}]]",
+            ),
+        )
+    elif function_names == ("execute",):
+        method_sources = (
+            "\n".join((
+                render_method_header("execute", query_fn_signature, "None"),
+                f"    async with self._client_cursor({params_arg}):",
+                "        pass",
+            )),
+        )
+        method_eager_expressions = (parameter_type_expressions,)
+    else:
+        msg = f"Unsupported generated query method set: {function_names!r}"
+        raise RuntimeError(msg)
+
+    fixed_sources = (
+        (
+            "_locations",
+            f"_locations = {locations!r}",
+            "generated locations binding",
+            (),
+        ),
+        (
+            "_stmt",
+            f"_stmt = psycopg.sql.SQL({sql!r})",
+            "generated statement binding",
+            ("psycopg",),
+        ),
+        (
+            "_row_factory",
+            f"_row_factory = builtins.staticmethod({row_factory})",
+            "generated row factory binding",
+            ("builtins", row_factory),
+        ),
+    )
+    steps = [
+        class_body_step_spec(
+            source=source,
+            binding=name,
+            binding_origin=origin,
+            locations=locations,
+            eager_read_expressions=eager_read_expressions,
+        )
+        for name, source, origin, eager_read_expressions in fixed_sources
+    ]
+    steps.extend(
+        class_body_step_spec(
+            source=source,
+            binding=scope.function_name,
+            binding_origin=f"generated query method {scope.function_name}",
+            locations=locations,
+            eager_read_expressions=eager_read_expressions,
+            function_scope=scope,
+        )
+        for source, scope, eager_read_expressions in zip(
+            method_sources,
+            function_scopes,
+            method_eager_expressions,
+            strict=True,
+        )
+    )
+    return QueryClassRenderSpec(
+        class_name=query_name,
+        result_type=result,
+        locations=locations,
+        steps=tuple(steps),
+    )
+
+
+def render_query_parameters(query_params: list[ParamSpec]) -> tuple[str, str]:
     match query_params:
         case []:
             params_arg = "None"
@@ -752,53 +1928,84 @@ def render_query_class(
         case params:
             params_arg = f"({', '.join(p.serialized_expr for p in params)})"
 
-    query_fn_params = [f"{p.name}: {p.py_type}" for p in query_params]
-    first_named_param_idx = next(
-        (i for i, p in enumerate(query_params) if p.is_named), -1
+    signature_parts = [f"{param.name}: {param.py_type}" for param in query_params]
+    first_named = next(
+        (index for index, param in enumerate(query_params) if param.is_named), -1
     )
-    if first_named_param_idx >= 0:
-        query_fn_params.insert(first_named_param_idx, "*")
-    query_fn_params.insert(0, "self")
+    if first_named >= 0:
+        signature_parts.insert(first_named, "*")
+    signature_parts.insert(0, "self")
+    return params_arg, ", ".join(signature_parts)
 
-    base_result = result.removesuffix(" | None")
-    row_factory = render_row_factory(result, result_columns)
 
-    if result_columns:
-        methods = f"""
+def render_method_header(
+    name: str,
+    parameters: str,
+    return_type: str,
+    *,
+    is_async: bool = True,
+) -> str:
+    prefix = "async def" if is_async else "def"
+    return f"{prefix} {name}({parameters}) -> {return_type}:"
 
-async def query_all_rows({", ".join(query_fn_params)}) -> list[{result}]:
-    async with self._client_cursor({params_arg}) as cur:
-        return await cur.fetchall()
 
-async def query_single_row({", ".join(query_fn_params)}) -> {result}:
-    async with self._client_cursor({params_arg}) as cur:
-        return runtime.get_one_row(await cur.fetchmany(2))
+def class_body_step_spec(
+    *,
+    source: str,
+    binding: str,
+    binding_origin: str,
+    locations: tuple[str, ...],
+    eager_read_expressions: tuple[str, ...],
+    function_scope: FunctionScopeSpec | None = None,
+) -> ClassBodyStepSpec:
+    return ClassBodyStepSpec(
+        source=source,
+        binding=NameOrigin(
+            name=binding,
+            origin=binding_origin,
+            locations=locations,
+        ),
+        eager_reads=tuple(
+            NameOrigin(
+                name=name,
+                origin=f"eager read while defining {binding!r}",
+                locations=locations,
+            )
+            for name in dict.fromkeys(
+                name
+                for expression in eager_read_expressions
+                for name in expression_root_names(expression)
+            )
+        ),
+        function_scope=function_scope,
+    )
 
-async def query_optional_row({", ".join(query_fn_params)}) -> {base_result} | None:
-    async with self._client_cursor({params_arg}) as cur:
-        return runtime.get_one_row_or_none(await cur.fetchmany(2))
 
-def query_stream({", ".join(query_fn_params)}) -> AbstractAsyncContextManager[AsyncIterator[{result}]]:
-    return self._server_cursor({params_arg})
+def expression_root_names(source: str) -> Iterator[str]:
+    previous_operator = ""
+    tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+    for token in tokens:
+        if token.type == tokenize.NAME:
+            if previous_operator != "." and not keyword.iskeyword(token.string):
+                yield token.string
+            previous_operator = ""
+        elif token.type == tokenize.OP:
+            previous_operator = token.string
+        elif token.type not in {
+            tokenize.ENCODING,
+            tokenize.ENDMARKER,
+            tokenize.NEWLINE,
+            tokenize.NL,
+        }:
+            previous_operator = ""
 
-        """.strip()  # noqa: E501
-    else:
-        methods = f"""
 
-async def execute({", ".join(query_fn_params)}) -> None:
-    async with self._client_cursor({params_arg}):
-        pass
-
-        """.strip()
-
+def render_query_class_spec(spec: QueryClassRenderSpec) -> str:
+    body = "\n\n".join(step.source for step in spec.steps)
     return f"""
 
-class {query_name}(Query[{result}]):
-    _locations = {tuple(locations)!r}
-    _stmt = psycopg.sql.SQL({sql!r})
-    _row_factory = staticmethod({row_factory})
-
-    {indent_block(methods, "    ")}
+class {spec.class_name}(Query[{spec.result_type}]):
+    {indent_block(body, "    ")}
 
     """.strip()
 
@@ -820,15 +2027,16 @@ def render_scalar_row_factory(result: str, column: ColumnSpec) -> str:
     if column.element_py_type is not None:
         return f"runtime.typed_array_row({column.element_py_type}, not_null={not_null})"
 
-    validate_arg = (
-        f", validate=lambda _v: runtime.validate_json_field({column.json_type}, _v)"
-        if column.json_type
-        else ""
-    )
-    if " | " in base_result and not validate_arg:
+    if column.json_model is not None:
+        return (
+            "runtime.typed_json_scalar_row("
+            f"{column.json_model.expression}, not_null={not_null})"
+        )
+
+    if " | " in base_result:
         return f"runtime.typed_value_row(not_null={not_null})"
 
-    return f"runtime.typed_scalar_row({base_result}, not_null={not_null}{validate_arg})"
+    return f"runtime.typed_scalar_row({base_result}, not_null={not_null})"
 
 
 def render_query_overload(
@@ -859,6 +2067,11 @@ class CodeQuery:
 
     @property
     def name(self) -> str:
+        md5_hash = hashlib.md5(self.sql.encode(), usedforsecurity=False).hexdigest()
+        return f"Query_{md5_hash}"
+
+    @property
+    def class_name(self) -> str:
         md5_hash = hashlib.md5(self.sql.encode(), usedforsecurity=False).hexdigest()
         return f"Query_{md5_hash}{'_' + self.row_type if self.row_type else ''}"
 

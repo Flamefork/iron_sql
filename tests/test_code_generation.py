@@ -8,12 +8,19 @@ from pathlib import Path
 import pytest
 
 from iron_sql.codegen import generate_sql_module
+from iron_sql.codegen.generator import JSONModelRef
 from iron_sql.codegen.generator import ModuleExprRef
 from iron_sql.codegen.generator import ParamSpec
 from iron_sql.codegen.sqlc import run_sqlc
 from tests.conftest import ProjectBuilder
 
 _USER_METADATA_TYPE = "tests.json_models.UserMetadata"
+_USER_METADATA_REF = JSONModelRef(
+    module_path="tests",
+    class_path="json_models.UserMetadata",
+    alias="tests",
+    origin="test JSON model",
+)
 _JSON_METADATA_EXPR = f"runtime.dump_json_value({_USER_METADATA_TYPE}, metadata)"
 _TEXT_METADATA_EXPR = f"runtime.dump_json_text({_USER_METADATA_TYPE}, metadata)"
 _NULLABLE_JSONB_METADATA_EXPR = (
@@ -32,7 +39,7 @@ q2 = testdb_sql("SELECT username FROM users")
 q3 = testdb_sql("SELECT id FROM users")
 """
     )
-    test_project.generate_no_import()
+    test_project.generate_checked()
 
     generated = (
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
@@ -127,7 +134,8 @@ q2 = testdb_sql("SELECT id, username FROM users", row_type="UserMini")
 """
     )
 
-    assert test_project.generate_no_import() is True
+    changed, _ = test_project.generate_checked()
+    assert changed is True
 
 
 def test_sqlc_failure_returns_false(test_project: ProjectBuilder) -> None:
@@ -175,7 +183,8 @@ def test_json_param_generates_successfully(test_project: ProjectBuilder) -> None
     test_project.add_query(
         "insert_json", "INSERT INTO json_payloads (payload) VALUES ($1)"
     )
-    assert test_project.generate_no_import() is True
+    changed, _ = test_project.generate_checked()
+    assert changed is True
 
 
 @pytest.mark.parametrize(
@@ -204,7 +213,7 @@ def test_json_model_param_serialized_expr_uses_direct_db_type_mapping(
             db_type=db_type,
             not_null=True,
             is_array=False,
-            json_type=_USER_METADATA_TYPE,
+            json_model=_USER_METADATA_REF,
         ).serialized_expr
         == expected
     )
@@ -219,7 +228,7 @@ def test_nullable_json_model_param_serialized_expr_keeps_none() -> None:
             db_type="jsonb",
             not_null=False,
             is_array=False,
-            json_type=_USER_METADATA_TYPE,
+            json_model=_USER_METADATA_REF,
         ).serialized_expr
         == _NULLABLE_JSONB_METADATA_EXPR
     )
@@ -234,8 +243,11 @@ def test_unsupported_param_types_array(test_project: ProjectBuilder) -> None:
 
 
 def test_generator_is_idempotent(test_project: ProjectBuilder) -> None:
-    assert test_project.generate_no_import() is True
-    assert test_project.generate_no_import() is False
+    first_changed, _ = test_project.generate_checked()
+    second_changed, _ = test_project.generate_checked()
+
+    assert first_changed is True
+    assert second_changed is False
 
 
 def test_generator_valid_explicit_row_type(test_project: ProjectBuilder) -> None:
@@ -248,7 +260,8 @@ def test_generator_valid_explicit_row_type(test_project: ProjectBuilder) -> None
         q = testdb_sql("SELECT id, username FROM users", row_type="UserMini")
         """
     )
-    assert test_project.generate_no_import() is True
+    changed, _ = test_project.generate_checked()
+    assert changed is True
 
 
 async def test_special_types_params(test_project: ProjectBuilder) -> None:
@@ -269,7 +282,8 @@ async def test_special_types_params(test_project: ProjectBuilder) -> None:
         "INSERT INTO special_types (id, d, t, ts, b, j) "
         "VALUES ($1, $2, $3, $4, $5, $6)",
     )
-    assert test_project.generate_no_import() is True
+    changed, _ = test_project.generate_checked()
+    assert changed is True
 
 
 def test_module_expr_ref_parse_and_evaluate(test_project: ProjectBuilder) -> None:
@@ -293,6 +307,21 @@ def get_dsn() -> str:
     assert expr_ref.evaluate(expected_type=str) == test_project.dsn
 
 
+def test_module_expr_ref_allows_literal_expression(
+    test_project: ProjectBuilder,
+) -> None:
+    (test_project.app_dir / "config.py").write_text("", encoding="utf-8")
+    if str(test_project.src_path) not in sys.path:
+        sys.path.insert(0, str(test_project.src_path))
+
+    expr_ref = ModuleExprRef.parse(
+        f"{test_project.app_pkg}.config:{test_project.dsn!r}"
+    )
+
+    assert expr_ref.import_names == ()
+    assert expr_ref.evaluate(expected_type=str) == test_project.dsn
+
+
 def test_dsn_expr_with_function_call(test_project: ProjectBuilder) -> None:
     (test_project.app_dir / "config.py").write_text(
         f"""
@@ -308,6 +337,7 @@ CONFIG = Config("{test_project.dsn}")
     )
 
     test_project.add_query("q", "SELECT 1 as value")
+    test_project.write_queries()
 
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
@@ -319,12 +349,45 @@ CONFIG = Config("{test_project.dsn}")
         src_path=test_project.src_path,
         tempdir_path=test_project.src_path,
     )
+    test_project.import_generated()
 
     generated_path = (
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
     )
     generated = generated_path.read_text()
     assert "CONFIG.get_dsn()" in generated
+
+
+def test_module_expression_imports_every_module_binding(
+    test_project: ProjectBuilder,
+) -> None:
+    (test_project.app_dir / "config.py").write_text(
+        f"""BASE_DSN = "{test_project.dsn}"
+
+def select_dsn(value: str) -> str:
+    return value
+""",
+        encoding="utf-8",
+    )
+    test_project.add_query("q", "SELECT 1")
+    test_project.write_queries()
+    if str(test_project.src_path) not in sys.path:
+        sys.path.insert(0, str(test_project.src_path))
+
+    generate_sql_module(
+        schema_path=Path("schema.sql"),
+        module_full_name=test_project.module_full_name,
+        dsn_expr=f"{test_project.app_pkg}.config:select_dsn(BASE_DSN)",
+        src_path=test_project.src_path,
+        tempdir_path=test_project.src_path,
+    )
+    test_project.import_generated()
+    generated = (
+        test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
+    ).read_text(encoding="utf-8")
+
+    assert f"from {test_project.app_pkg}.config import select_dsn" in generated
+    assert f"from {test_project.app_pkg}.config import BASE_DSN" in generated
 
 
 def test_dsn_expr_with_factory_call_generates_valid_python(
@@ -340,6 +403,7 @@ def get_dsn() -> str:
     )
 
     test_project.add_query("q", "SELECT 1 as value")
+    test_project.write_queries()
 
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
@@ -351,6 +415,7 @@ def get_dsn() -> str:
         src_path=test_project.src_path,
         tempdir_path=test_project.src_path,
     )
+    test_project.import_generated()
 
     generated_path = (
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
@@ -368,6 +433,7 @@ def test_pool_options_expr(test_project: ProjectBuilder) -> None:
     (test_project.app_dir / "config.py").write_text(config, encoding="utf-8")
 
     test_project.add_query("q", "SELECT 1 as value")
+    test_project.write_queries()
 
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
@@ -380,6 +446,7 @@ def test_pool_options_expr(test_project: ProjectBuilder) -> None:
         src_path=test_project.src_path,
         tempdir_path=test_project.src_path,
     )
+    test_project.import_generated()
 
     generated_path = (
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
@@ -400,6 +467,7 @@ def get_pool_options() -> dict[str, object]:
     (test_project.app_dir / "config.py").write_text(config, encoding="utf-8")
 
     test_project.add_query("q", "SELECT 1 as value")
+    test_project.write_queries()
 
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
@@ -412,6 +480,7 @@ def get_pool_options() -> dict[str, object]:
         src_path=test_project.src_path,
         tempdir_path=test_project.src_path,
     )
+    test_project.import_generated()
 
     generated_path = (
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
@@ -429,6 +498,7 @@ def test_pool_options_expr_invalid_fails_during_generation(
     (test_project.app_dir / "config.py").write_text(config, encoding="utf-8")
 
     test_project.add_query("q", "SELECT 1 as value")
+    test_project.write_queries()
 
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
@@ -451,7 +521,7 @@ def test_pool_options_expr_invalid_fails_during_generation(
 
 def test_pool_options_expr_not_set(test_project: ProjectBuilder) -> None:
     test_project.add_query("q", "SELECT 1 as value")
-    test_project.generate_no_import()
+    test_project.generate_checked()
 
     generated_path = (
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"

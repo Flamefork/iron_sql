@@ -4,20 +4,24 @@ import sys
 import textwrap
 import uuid
 from collections.abc import AsyncGenerator
+from collections.abc import Callable
 from collections.abc import Iterator
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 from typing import LiteralString
 
 import psycopg
 import pytest
 from psycopg import sql
+from pydantic import alias_generators
 from testcontainers.postgres import (  # pyright: ignore[reportMissingTypeStubs]
     PostgresContainer,
 )
 
 from iron_sql.codegen import generate_sql_module
 from iron_sql.runtime import ConnectionPool
+from tests.generated_oracles import assert_generated_module_contract
 
 # =============================================================================
 # PostgreSQL Container & Connection
@@ -152,7 +156,7 @@ class ProjectBuilder:
         self.app_pkg = f"testapp_{test_name}"
         self.app_dir = self.src_path / self.app_pkg
         self.queries: list[tuple[str, str, dict[str, Any]]] = []
-        self.generated_modules: list[Any] = []
+        self.generated_modules: list[ModuleType] = []
         self.queries_source: str | None = None
 
         self.app_dir.mkdir(parents=True, exist_ok=True)
@@ -179,12 +183,34 @@ class ProjectBuilder:
     def add_query(self, name: str, sql: str, **kwargs: Any) -> None:
         self.queries.append((name, sql, kwargs))
 
+    def write_queries(self) -> None:
+        if self.queries_source is not None:
+            (self.app_dir / "queries.py").write_text(
+                self.queries_source, encoding="utf-8"
+            )
+            return
+
+        lines = ["from typing import Any"]
+        lines.extend(["def testdb_sql(q: str, **kwargs: Any) -> Any: ...", ""])
+        for name, query_sql, kwargs in self.queries:
+            args = ", ".join(f"{key}={value!r}" for key, value in kwargs.items())
+            call_args = f'"""{query_sql}"""'
+            if args:
+                call_args += f", {args}"
+
+            if name:
+                lines.append(f"{name} = testdb_sql({call_args})")
+            else:
+                lines.append(f"testdb_sql({call_args})")
+        (self.app_dir / "queries.py").write_text("\n".join(lines), encoding="utf-8")
+
     def generate_no_import(
         self,
         *,
         type_overrides: dict[str, str] | None = None,
         json_model_overrides: dict[str, str] | None = None,
         pool_options: dict[str, Any] | None = None,
+        to_pascal_fn: Callable[[str], str] = alias_generators.to_pascal,
     ) -> bool:
         config_lines = [f'DSN = "{self.dsn}"']
         if pool_options is not None:
@@ -193,31 +219,12 @@ class ProjectBuilder:
             "\n".join(config_lines) + "\n", encoding="utf-8"
         )
 
-        if self.queries_source is not None:
-            (self.app_dir / "queries.py").write_text(
-                self.queries_source, encoding="utf-8"
-            )
-        else:
-            lines = ["from typing import Any"]
-            lines.extend(["def testdb_sql(q: str, **kwargs: Any) -> Any: ...", ""])
-
-            for name, sql, kwargs in self.queries:
-                args = ", ".join(f"{k}={v!r}" for k, v in kwargs.items())
-                call_args = f'"""{sql}"""'
-                if args:
-                    call_args += f", {args}"
-
-                if name:
-                    lines.append(f"{name} = testdb_sql({call_args})")
-                else:
-                    lines.append(f"testdb_sql({call_args})")
-
-            (self.app_dir / "queries.py").write_text("\n".join(lines), encoding="utf-8")
+        self.write_queries()
 
         if str(self.src_path) not in sys.path:
             sys.path.insert(0, str(self.src_path))
 
-        return generate_sql_module(
+        changed = generate_sql_module(
             schema_path=Path("schema.sql"),
             module_full_name=self.module_full_name,
             dsn_expr=f"{self.app_pkg}.config:DSN",
@@ -230,7 +237,13 @@ class ProjectBuilder:
             tempdir_path=self.src_path,
             type_overrides=type_overrides,
             json_model_overrides=json_model_overrides,
+            to_pascal_fn=to_pascal_fn,
         )
+        target_path = self.src_path / f"{self.module_full_name.replace('.', '/')}.py"
+        if target_path.exists():
+            source = target_path.read_text(encoding="utf-8")
+            compile(source, target_path.as_posix(), "exec")
+        return changed
 
     def generate(
         self,
@@ -238,19 +251,39 @@ class ProjectBuilder:
         type_overrides: dict[str, str] | None = None,
         json_model_overrides: dict[str, str] | None = None,
         pool_options: dict[str, Any] | None = None,
-    ) -> Any:
-        self.generate_no_import(
+    ) -> ModuleType:
+        _, module = self.generate_checked(
             type_overrides=type_overrides,
             json_model_overrides=json_model_overrides,
             pool_options=pool_options,
         )
+        return module
 
+    def generate_checked(
+        self,
+        *,
+        type_overrides: dict[str, str] | None = None,
+        json_model_overrides: dict[str, str] | None = None,
+        pool_options: dict[str, Any] | None = None,
+        to_pascal_fn: Callable[[str], str] = alias_generators.to_pascal,
+    ) -> tuple[bool, ModuleType]:
+        changed = self.generate_no_import(
+            type_overrides=type_overrides,
+            json_model_overrides=json_model_overrides,
+            pool_options=pool_options,
+            to_pascal_fn=to_pascal_fn,
+        )
+
+        return changed, self.import_generated()
+
+    def import_generated(self) -> ModuleType:
         importlib.invalidate_caches()
         sys.modules.pop(self.module_full_name, None)
 
-        mod = importlib.import_module(self.module_full_name)
-        self.generated_modules.append(mod)
-        return mod
+        module = importlib.import_module(self.module_full_name)
+        assert_generated_module_contract(module)
+        self.generated_modules.append(module)
+        return module
 
 
 @pytest.fixture
@@ -261,7 +294,10 @@ async def test_project(
     schema_path: Path,
 ) -> AsyncGenerator[ProjectBuilder]:
     node_name = str(request.node.name)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-    clean_name = node_name.replace("[", "_").replace("]", "_").replace("-", "_")
+    clean_name = "".join(
+        char if char.isascii() and (char.isalnum() or char == "_") else "_"
+        for char in node_name
+    )
     builder = ProjectBuilder(tmp_path, pg_test_dsn, clean_name, schema_path)
 
     # Snapshot state before test

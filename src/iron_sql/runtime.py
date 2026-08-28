@@ -512,6 +512,31 @@ def typed_scalar_row[T](
 
 
 @overload
+def typed_json_scalar_row[T](
+    typ: type[T],
+    *,
+    not_null: Literal[True],
+) -> psycopg.rows.BaseRowFactory[T]: ...
+
+
+@overload
+def typed_json_scalar_row[T](
+    typ: type[T],
+    *,
+    not_null: Literal[False],
+) -> psycopg.rows.BaseRowFactory[T | None]: ...
+
+
+def typed_json_scalar_row[T](
+    typ: type[T], *, not_null: bool
+) -> psycopg.rows.BaseRowFactory[T | None]:
+    def validate(value: object) -> T:
+        return validate_json_field(typ, value)
+
+    return typed_scalar_row(typ, not_null=not_null, validate=validate)
+
+
+@overload
 def typed_value_row[T](
     *,
     not_null: Literal[True],

@@ -303,19 +303,48 @@ class Payload(BaseModel):
 
     module_a = f"{test_project.app_pkg}.json_models_a"
     module_b = f"{test_project.app_pkg}.json_models_b"
-    assert test_project.generate_no_import(
+    changed, _ = test_project.generate_checked(
         json_model_overrides={
             "users.metadata": f"{module_a}:Payload",
             "json_payloads.payload": f"{module_b}:Payload",
         },
     )
+    assert changed is True
 
     generated_path = (
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
     )
     generated = generated_path.read_text(encoding="utf-8")
 
-    assert f"import {module_a}" in generated
-    assert f"import {module_b}" in generated
-    assert f"{module_a}.Payload" in generated
-    assert f"{module_b}.Payload" in generated
+    assert f"import {module_a} as _iron_sql_json_0" in generated
+    assert f"import {module_b} as _iron_sql_json_1" in generated
+    assert "_iron_sql_json_0.Payload" in generated
+    assert "_iron_sql_json_1.Payload" in generated
+
+
+def test_json_model_overrides_order_does_not_change_generated_module(
+    test_project: ProjectBuilder,
+) -> None:
+    test_project.add_query(
+        "sel",
+        "SELECT users.metadata, json_payloads.payload "
+        "FROM users CROSS JOIN json_payloads WHERE users.id = $1",
+    )
+    overrides = {
+        "users.metadata": "tests.json_models:UserMetadata",
+        "json_payloads.payload": "tests.json_models:UserMetadata",
+    }
+
+    first_changed, _ = test_project.generate_checked(json_model_overrides=overrides)
+    generated_path = (
+        test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
+    )
+    first_source = generated_path.read_bytes()
+
+    second_changed, _ = test_project.generate_checked(
+        json_model_overrides=dict(reversed(overrides.items())),
+    )
+
+    assert first_changed is True
+    assert second_changed is False
+    assert generated_path.read_bytes() == first_source

@@ -14,6 +14,7 @@ from iron_sql.runtime import get_one_row_or_none
 from iron_sql.runtime import json_validated
 from iron_sql.runtime import register_enums
 from iron_sql.runtime import typed_array_row
+from iron_sql.runtime import typed_json_scalar_row
 from iron_sql.runtime import typed_scalar_row
 from tests.conftest import ProjectBuilder
 from tests.json_models import UserMetadata
@@ -125,6 +126,19 @@ async def test_typed_scalar_row_not_null_raises_on_none(
         await cur.execute("SELECT NULL::int")
         with pytest.raises(TypeError, match="Expected non-null value"):
             await cur.fetchone()
+
+
+async def test_typed_json_scalar_row_validates_model(pool: ConnectionPool) -> None:
+    async with (
+        pool.connection() as conn,
+        conn.cursor(
+            row_factory=typed_json_scalar_row(UserMetadata, not_null=True)
+        ) as cur,
+    ):
+        await cur.execute('SELECT \'{"key": "k", "value": "v"}\'::jsonb')
+        value = await cur.fetchone()
+
+    assert value == UserMetadata(key="k", value="v")
 
 
 async def test_pool_forwards_pool_options(pg_dsn: str) -> None:
