@@ -2,11 +2,11 @@ import inspect
 import symtable
 import typing
 from collections.abc import Iterator
+from collections.abc import Mapping
 from pathlib import Path
 from types import ModuleType
 from typing import cast
 
-from iron_sql.codegen.generator import is_query_method_external_read
 from iron_sql.codegen.generator import query_method_required_external_reads
 from iron_sql.runtime import Query
 
@@ -45,8 +45,12 @@ def assert_generated_module_contract(module: ModuleType) -> None:
         tuple(query_class.__name__ for query_class in query_classes),
     )
     for query_class in query_classes:
-        for method_name in _QUERY_METHODS & vars(query_class).keys():
-            method = vars(query_class)[method_name]
+        class_namespace = cast("Mapping[str, object]", vars(query_class))
+        for method_name in _QUERY_METHODS & class_namespace.keys():
+            method = class_namespace[method_name]
+            if not callable(method):
+                msg = f"{query_class.__name__}.{method_name} is not callable"
+                raise TypeError(msg)
             parameters = tuple(inspect.signature(method).parameters)
             if not parameters or parameters[0] != "self":
                 label = f"{query_class.__name__}.{method_name}"
@@ -107,13 +111,14 @@ def type_parameter_namespace(*owners: object) -> dict[str, object]:
 
 
 def generated_query_classes(module: ModuleType) -> tuple[type[Query[object]], ...]:
-    module_query = vars(module)["Query"]
+    namespace = cast("dict[str, object]", vars(module))
+    module_query = namespace["Query"]
     if not inspect.isclass(module_query) or not issubclass(module_query, Query):
         msg = f"generated module {module.__name__} has no runtime Query base"
         raise AssertionError(msg)
     return tuple(
-        cast("type[Query[object]]", value)
-        for value in vars(module).values()
+        value
+        for value in namespace.values()
         if inspect.isclass(value)
         and value is not module_query
         and issubclass(value, module_query)
@@ -125,6 +130,11 @@ def assert_query_source_namespaces(
     query_class_names: tuple[str, ...],
 ) -> None:
     module_table = symtable.symtable(source, "generated.py", "exec")
+    imported_names = {
+        symbol.get_name()
+        for symbol in module_table.get_symbols()
+        if symbol.is_imported()
+    }
     class_tables = {
         table.get_name(): table
         for table in symbol_tables(module_table)
@@ -151,7 +161,9 @@ def assert_query_source_namespaces(
             actual_label = f"{class_name} method scopes {sorted(actual_methods)!r}"
             problems.append(f"{actual_label}, bindings {sorted(expected_methods)!r}")
         for method_table in method_tables:
-            problems.extend(method_namespace_problems(class_name, method_table))
+            problems.extend(
+                method_namespace_problems(class_name, method_table, imported_names)
+            )
     if problems:
         details = "\n  ".join(problems)
         msg = f"generated query namespaces violate the render contract:\n  {details}"
@@ -161,6 +173,7 @@ def assert_query_source_namespaces(
 def method_namespace_problems(
     class_name: str,
     method: symtable.Function,
+    imported_names: set[str],
 ) -> list[str]:
     label = f"{class_name}.{method.get_name()}"
     parameters = set(method.get_parameters())
@@ -177,9 +190,7 @@ def method_namespace_problems(
     missing_reads = sorted(required_reads - reads)
     if missing_reads:
         problems.append(f"{label} does not read required {', '.join(missing_reads)}")
-    unclaimed_reads = sorted(
-        name for name in reads if not is_query_method_external_read(name)
-    )
+    unclaimed_reads = sorted(reads - imported_names)
     if unclaimed_reads:
         problems.append(f"{label} reads unclaimed {', '.join(unclaimed_reads)}")
     nested = list(method.get_children())

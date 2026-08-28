@@ -1,10 +1,18 @@
+from __future__ import annotations
+
 import json
 import re
-from pathlib import Path
+from typing import TYPE_CHECKING
+from typing import cast
 
 import pytest
 
-from tests.conftest import ProjectBuilder
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+
+    from iron_sql.runtime import Query
+    from tests.conftest import ProjectBuilder
 
 _BASE_SQL = "SELECT 1 AS value"
 
@@ -32,10 +40,11 @@ def test_a_statement_inside_a_hidden_directory_is_not_collected(
     )
 
     module = test_project.generate()
+    testdb_sql = cast("Callable[[str], Query[object]]", vars(module)["testdb_sql"])
 
-    module.testdb_sql(_BASE_SQL)
+    testdb_sql(_BASE_SQL)
     with pytest.raises(KeyError, match="Unknown statement"):
-        module.testdb_sql(hidden_sql)
+        testdb_sql(hidden_sql)
 
 
 def test_an_unparsable_file_inside_a_hidden_directory_does_not_abort_the_scan(
@@ -51,8 +60,9 @@ def test_an_unparsable_file_inside_a_hidden_directory_does_not_abort_the_scan(
     )
 
     module = test_project.generate()
+    testdb_sql = cast("Callable[[str], Query[object]]", vars(module)["testdb_sql"])
 
-    module.testdb_sql(_BASE_SQL)
+    testdb_sql(_BASE_SQL)
 
 
 def test_a_statement_inside_a_virtual_environment_is_not_collected(
@@ -68,10 +78,11 @@ def test_a_statement_inside_a_virtual_environment_is_not_collected(
     )
 
     module = test_project.generate()
+    testdb_sql = cast("Callable[[str], Query[object]]", vars(module)["testdb_sql"])
 
-    module.testdb_sql(_BASE_SQL)
+    testdb_sql(_BASE_SQL)
     with pytest.raises(KeyError, match="Unknown statement"):
-        module.testdb_sql(environment_sql)
+        testdb_sql(environment_sql)
 
 
 def test_an_unparsable_file_inside_a_virtual_environment_does_not_abort_the_scan(
@@ -86,8 +97,9 @@ def test_an_unparsable_file_inside_a_virtual_environment_does_not_abort_the_scan
     )
 
     module = test_project.generate()
+    testdb_sql = cast("Callable[[str], Query[object]]", vars(module)["testdb_sql"])
 
-    module.testdb_sql(_BASE_SQL)
+    testdb_sql(_BASE_SQL)
 
 
 def test_the_scan_root_is_not_judged_by_the_rules_for_child_directories(
@@ -103,8 +115,9 @@ def test_the_scan_root_is_not_judged_by_the_rules_for_child_directories(
     test_project.add_query("base", _BASE_SQL)
 
     module = test_project.generate()
+    testdb_sql = cast("Callable[[str], Query[object]]", vars(module)["testdb_sql"])
 
-    module.testdb_sql(_BASE_SQL)
+    testdb_sql(_BASE_SQL)
 
 
 def test_a_statement_in_a_directory_no_import_can_name_is_collected(
@@ -118,8 +131,9 @@ def test_a_statement_in_a_directory_no_import_can_name_is_collected(
     )
 
     module = test_project.generate()
+    testdb_sql = cast("Callable[[str], Query[object]]", vars(module)["testdb_sql"])
 
-    module.testdb_sql(script_sql)
+    testdb_sql(script_sql)
 
 
 def test_a_statement_in_a_file_no_import_can_name_is_collected(
@@ -133,8 +147,9 @@ def test_a_statement_in_a_file_no_import_can_name_is_collected(
     )
 
     module = test_project.generate()
+    testdb_sql = cast("Callable[[str], Query[object]]", vars(module)["testdb_sql"])
 
-    module.testdb_sql(script_sql)
+    testdb_sql(script_sql)
 
 
 def test_a_directory_without_an_init_file_is_scanned(
@@ -148,8 +163,9 @@ def test_a_directory_without_an_init_file_is_scanned(
     )
 
     module = test_project.generate()
+    testdb_sql = cast("Callable[[str], Query[object]]", vars(module)["testdb_sql"])
 
-    module.testdb_sql(namespace_sql)
+    testdb_sql(namespace_sql)
 
 
 def test_statement_locations_use_whole_tree_order(
@@ -189,10 +205,11 @@ def test_a_symlinked_directory_is_not_scanned(
     debug_path = test_project.root / "debug"
 
     module = test_project.generate(debug_path=debug_path)
+    testdb_sql = cast("Callable[[str], Query[object]]", vars(module)["testdb_sql"])
 
-    module.testdb_sql(_BASE_SQL)
+    testdb_sql(_BASE_SQL)
     with pytest.raises(KeyError, match="Unknown statement"):
-        module.testdb_sql(linked_sql)
+        testdb_sql(linked_sql)
     assert json.loads(
         (debug_path / "skipped_dirs.json").read_text(encoding="utf-8")
     ) == [{"location": "linked", "reason": "symbolic link"}]
@@ -208,8 +225,9 @@ def test_a_symlinked_python_file_is_scanned(
     debug_path = test_project.root / "debug"
 
     module = test_project.generate(debug_path=debug_path)
+    testdb_sql = cast("Callable[[str], Query[object]]", vars(module)["testdb_sql"])
 
-    module.testdb_sql(linked_sql)
+    testdb_sql(linked_sql)
     assert (
         json.loads((debug_path / "skipped_dirs.json").read_text(encoding="utf-8")) == []
     )

@@ -1,5 +1,6 @@
 import contextlib
 import uuid
+from collections.abc import AsyncGenerator
 
 import psycopg
 import psycopg.errors
@@ -8,24 +9,53 @@ import pytest
 from iron_sql import runtime
 from iron_sql.runtime import NoRowsError
 from iron_sql.runtime import TooManyRowsError
-from tests.conftest import ProjectBuilder
+from tests.conftest import SCHEMA_SQL
+from tests.conftest import GeneratedTestDB
+from tests.conftest import generated_package
+
+generated_package(
+    "query_execution",
+    schema=SCHEMA_SQL,
+    queries='''
+        from tests.generated.query_execution.testdb import testdb_sql
+
+        testdb_sql("SELECT id FROM users ORDER BY created_at")
+        testdb_sql("SELECT * FROM users WHERE id = $1")
+        testdb_sql("SELECT id, username FROM users WHERE id=$1", row_type="UserMini")
+        testdb_sql("INSERT INTO users (id, username, is_active) VALUES ($1, $2, $3)")
+        testdb_sql("SELECT id, username, is_active FROM users WHERE id = $1")
+        testdb_sql("""INSERT INTO users (id, username, metadata)
+        VALUES ($1, $2, $3) RETURNING metadata""")
+        testdb_sql("INSERT INTO json_payloads (payload) VALUES ($1) RETURNING payload")
+        testdb_sql("SELECT 1")
+        testdb_sql("SELECT * FROM users WHERE username = $1")
+        testdb_sql("INSERT INTO users (id, username) VALUES ($1, $2)")
+        testdb_sql("INSERT INTO users (id, username) VALUES ($1, 'tx_user')")
+        testdb_sql("SELECT count(*) as cnt FROM users WHERE username = 'tx_user'")
+        testdb_sql("SELECT username FROM users WHERE id = $1")
+        testdb_sql("INSERT INTO users (id, username) VALUES ($1, 'rollback_user')")
+        testdb_sql("SELECT count(*) as cnt FROM users WHERE username = 'rollback_user'")
+    ''',
+)
+
+from tests.generated.query_execution import testdb
 
 
-async def test_result_shapes(test_project: ProjectBuilder) -> None:
+@pytest.fixture(autouse=True)
+async def use_generated_database(
+    generated_test_db: GeneratedTestDB,
+) -> AsyncGenerator[None]:
+    async with generated_test_db("query_execution"):
+        yield
+
+
+async def test_result_shapes() -> None:
     get_users_sql = "SELECT id FROM users ORDER BY created_at"
-    test_project.add_query("get_users", get_users_sql)
 
     get_user_full_sql = "SELECT * FROM users WHERE id = $1"
-    test_project.add_query("get_user_full", get_user_full_sql)
 
     get_user_mini_sql = "SELECT id, username FROM users WHERE id=$1"
-    test_project.add_query(
-        "get_user_mini",
-        get_user_mini_sql,
-        row_type="UserMini",
-    )
-
-    mod = test_project.generate()
+    mod = testdb
 
     id1 = uuid.uuid4()
     id2 = uuid.uuid4()
@@ -51,14 +81,11 @@ async def test_result_shapes(test_project: ProjectBuilder) -> None:
     assert mini.username == "u1"
 
 
-async def test_basic_execution(test_project: ProjectBuilder) -> None:
+async def test_basic_execution() -> None:
     insert_sql = "INSERT INTO users (id, username, is_active) VALUES ($1, $2, $3)"
     select_sql = "SELECT id, username, is_active FROM users WHERE id = $1"
 
-    test_project.add_query("ins", insert_sql)
-    test_project.add_query("sel", select_sql)
-
-    mod = test_project.generate()
+    mod = testdb
 
     uid = uuid.uuid4()
 
@@ -71,14 +98,10 @@ async def test_basic_execution(test_project: ProjectBuilder) -> None:
     assert row.is_active is True
 
 
-async def test_jsonb_roundtrip(test_project: ProjectBuilder) -> None:
-    sql = (
-        "INSERT INTO users (id, username, metadata) "
-        "VALUES ($1, $2, $3) RETURNING metadata"
-    )
-    test_project.add_query("q", sql)
-
-    mod = test_project.generate()
+async def test_jsonb_roundtrip() -> None:
+    sql = """INSERT INTO users (id, username, metadata)
+VALUES ($1, $2, $3) RETURNING metadata"""
+    mod = testdb
     uid = uuid.uuid4()
     data = {"key": "value", "list": [1, 2], "nested": {"a": 1}}
 
@@ -86,27 +109,23 @@ async def test_jsonb_roundtrip(test_project: ProjectBuilder) -> None:
     assert res == data
 
 
-async def test_json_roundtrip(test_project: ProjectBuilder) -> None:
+async def test_json_roundtrip() -> None:
     insert_sql = "INSERT INTO json_payloads (payload) VALUES ($1) RETURNING payload"
-    test_project.add_query("q", insert_sql)
-
-    mod = test_project.generate()
+    mod = testdb
     data = {"key": "value", "list": [1, 2]}
 
     res = await mod.testdb_sql(insert_sql).query_single_row(data)
     assert res == data
 
 
-def test_unknown_statement_dispatch(test_project: ProjectBuilder) -> None:
-    test_project.add_query("q1", "SELECT 1")
-    mod = test_project.generate()
+def test_unknown_statement_dispatch() -> None:
+    mod = testdb
     with pytest.raises(KeyError, match="Unknown statement"):
         mod.testdb_sql("SELECT 42")
 
 
-async def test_runtime_context_pool(test_project: ProjectBuilder) -> None:
-    test_project.add_query("q", "SELECT 1")
-    mod = test_project.generate()
+async def test_runtime_context_pool() -> None:
+    mod = testdb
 
     # Nested connection reuse
     async with mod.testdb_connection() as c1, mod.testdb_connection() as c2:
@@ -124,14 +143,11 @@ async def test_runtime_context_pool(test_project: ProjectBuilder) -> None:
     pool.psycopg_pool.get_stats()
 
 
-async def test_runtime_errors(test_project: ProjectBuilder) -> None:
+async def test_runtime_errors() -> None:
     select_sql = "SELECT * FROM users WHERE username = $1"
     insert_sql = "INSERT INTO users (id, username) VALUES ($1, $2)"
 
-    test_project.add_query("sel", select_sql)
-    test_project.add_query("ins", insert_sql)
-
-    mod = test_project.generate()
+    mod = testdb
     uid1 = uuid.uuid4()
     uid2 = uuid.uuid4()
 
@@ -151,14 +167,11 @@ async def test_runtime_errors(test_project: ProjectBuilder) -> None:
         await mod.testdb_sql(select_sql).query_optional_row("duplicate")
 
 
-async def test_transaction_commit(test_project: ProjectBuilder) -> None:
+async def test_transaction_commit() -> None:
     insert = "INSERT INTO users (id, username) VALUES ($1, 'tx_user')"
     select = "SELECT count(*) as cnt FROM users WHERE username = 'tx_user'"
 
-    test_project.add_query("i", insert)
-    test_project.add_query("s", select)
-
-    mod = test_project.generate()
+    mod = testdb
     uid = uuid.uuid4()
 
     async with mod.testdb_transaction():
@@ -168,10 +181,8 @@ async def test_transaction_commit(test_project: ProjectBuilder) -> None:
     assert row == 1
 
 
-async def test_ensure_transaction_error_state(test_project: ProjectBuilder) -> None:
-    test_project.add_query("sel", "SELECT 1")
-
-    mod = test_project.generate()
+async def test_ensure_transaction_error_state() -> None:
+    mod = testdb
 
     async with mod.testdb_connection() as conn:
         await conn.execute("BEGIN")
@@ -185,14 +196,11 @@ async def test_ensure_transaction_error_state(test_project: ProjectBuilder) -> N
                 pass
 
 
-async def test_with_connection(test_project: ProjectBuilder) -> None:
+async def test_with_connection() -> None:
     insert_sql = "INSERT INTO users (id, username) VALUES ($1, $2)"
     select_sql = "SELECT username FROM users WHERE id = $1"
 
-    test_project.add_query("ins", insert_sql)
-    test_project.add_query("sel", select_sql)
-
-    mod = test_project.generate()
+    mod = testdb
     uid = uuid.uuid4()
 
     async with mod.TESTDB_POOL.connection() as conn:
@@ -214,14 +222,11 @@ async def test_with_connection(test_project: ProjectBuilder) -> None:
     assert row2 == "explicit"
 
 
-async def test_transaction_rollback(test_project: ProjectBuilder) -> None:
+async def test_transaction_rollback() -> None:
     insert = "INSERT INTO users (id, username) VALUES ($1, 'rollback_user')"
     select = "SELECT count(*) as cnt FROM users WHERE username = 'rollback_user'"
 
-    test_project.add_query("i", insert)
-    test_project.add_query("s", select)
-
-    mod = test_project.generate()
+    mod = testdb
     uid = uuid.uuid4()
 
     try:

@@ -5,6 +5,7 @@
 # pyright: reportUnusedParameter=false
 # ruff: noqa
 
+import builtins
 import datetime
 import decimal
 import ipaddress
@@ -20,14 +21,11 @@ from enum import StrEnum
 from typing import Any
 from typing import Literal
 from typing import overload
-
 import psycopg
 import psycopg.rows
 import psycopg.sql
 import psycopg.types.json
-
 from iron_sql import runtime
-
 from example.config import DSN
 from example.config import POOL_OPTIONS
 import example.models
@@ -47,7 +45,7 @@ class MydbTaskStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
-ENUM_TYPES: list[tuple[str, type[StrEnum]]] = [
+ENUM_TYPES: builtins.list[builtins.tuple[builtins.str, builtins.type[StrEnum]]] = [
     ('"public"."task_priority"', MydbTaskPriority),
     ('"public"."task_status"', MydbTaskStatus),
 ]
@@ -81,14 +79,17 @@ async def mydb_transaction() -> AsyncGenerator[None]:
 
 @asynccontextmanager
 async def mydb_listen_session(
-    channel: str,
-) -> AsyncGenerator[AsyncGenerator[str]]:
+    channel: builtins.str,
+) -> AsyncGenerator[AsyncGenerator[builtins.str]]:
     async with MYDB_POOL.connection() as conn:
         async with runtime.listen(conn, channel) as payloads:
             yield payloads
 
 
-async def mydb_notify(channel: str, payload: str = "") -> None:
+async def mydb_notify(
+    channel: builtins.str,
+    payload: builtins.str = "",
+) -> None:
     async with mydb_connection() as conn:
         await runtime.notify(conn, channel, payload)
 
@@ -99,7 +100,7 @@ class MydbTask:
     id: uuid.UUID
     project_id: uuid.UUID
     assignee_id: uuid.UUID | None
-    title: str
+    title: builtins.str
     status: MydbTaskStatus
     priority: MydbTaskPriority
     metadata: example.models.TaskMetadata | None
@@ -110,55 +111,63 @@ class MydbTask:
 @dataclass(kw_only=True)
 class MydbUser:
     id: uuid.UUID
-    username: str
-    email: str
+    username: builtins.str
+    email: builtins.str
     created_at: datetime.datetime
 
 
 @dataclass(kw_only=True)
 class TaskStatusCount:
     status: MydbTaskStatus
-    task_count: int
+    task_count: builtins.int
 
 
 class Query[T](runtime.Query[T]):
-    _connection_factory = staticmethod(mydb_connection)
+    _connection_factory = builtins.staticmethod(mydb_connection)
 
 
 class Query_3ee53b6909da8b4496346dda36c9f442(Query[None]):
     _locations = ('example/main.py:23',)
-    _stmt = psycopg.sql.SQL('INSERT INTO users (id, username, email)\nVALUES ($1, $2, $3)')
-    _row_factory = staticmethod(psycopg.rows.scalar_row)
 
-    async def execute(self, *, id: uuid.UUID, username: str, email: str) -> None:
+    _stmt = psycopg.sql.SQL('INSERT INTO users (id, username, email)\nVALUES ($1, $2, $3)')
+
+    _row_factory = builtins.staticmethod(psycopg.rows.scalar_row)
+
+    async def execute(self, *, id: uuid.UUID, username: builtins.str, email: builtins.str) -> None:
         async with self._client_cursor((id, username, email)):
             pass
 
 
 class Query_67ac0768d48a654b1a305124c92372e8(Query[None]):
     _locations = ('example/main.py:33',)
-    _stmt = psycopg.sql.SQL('INSERT INTO projects (id, name, owner_id, settings)\nVALUES ($1, $2, $3, $4)')
-    _row_factory = staticmethod(psycopg.rows.scalar_row)
 
-    async def execute(self, *, id: uuid.UUID, name: str, owner_id: uuid.UUID, settings: example.models.ProjectSettings) -> None:
+    _stmt = psycopg.sql.SQL('INSERT INTO projects (id, name, owner_id, settings)\nVALUES ($1, $2, $3, $4)')
+
+    _row_factory = builtins.staticmethod(psycopg.rows.scalar_row)
+
+    async def execute(self, *, id: uuid.UUID, name: builtins.str, owner_id: uuid.UUID, settings: example.models.ProjectSettings) -> None:
         async with self._client_cursor((id, name, owner_id, psycopg.types.json.Jsonb(runtime.dump_json_value(example.models.ProjectSettings, settings)))):
             pass
 
 
 class Query_bd4c62c78a942bfd1f087f87a19f2743(Query[None]):
     _locations = ('example/main.py:50', 'example/main.py:65')
-    _stmt = psycopg.sql.SQL('INSERT INTO tasks (id, project_id, title, priority, assignee_id, metadata, due_date)\nVALUES ($1, $2, $3, $4, $5, $6, $7)')
-    _row_factory = staticmethod(psycopg.rows.scalar_row)
 
-    async def execute(self, *, id: uuid.UUID, project_id: uuid.UUID, title: str, priority: MydbTaskPriority, assignee_id: uuid.UUID | None, metadata: example.models.TaskMetadata | None, due_date: datetime.date | None) -> None:
+    _stmt = psycopg.sql.SQL('INSERT INTO tasks (id, project_id, title, priority, assignee_id, metadata, due_date)\nVALUES ($1, $2, $3, $4, $5, $6, $7)')
+
+    _row_factory = builtins.staticmethod(psycopg.rows.scalar_row)
+
+    async def execute(self, *, id: uuid.UUID, project_id: uuid.UUID, title: builtins.str, priority: MydbTaskPriority, assignee_id: uuid.UUID | None, metadata: example.models.TaskMetadata | None, due_date: datetime.date | None) -> None:
         async with self._client_cursor((id, project_id, title, priority, assignee_id, psycopg.types.json.Jsonb(runtime.dump_json_value(example.models.TaskMetadata, metadata)) if metadata is not None else None, due_date)):
             pass
 
 
 class Query_12e061f7aa94bf484295ab0018520059(Query[None]):
     _locations = ('example/main.py:81', 'example/main.py:168')
+
     _stmt = psycopg.sql.SQL('UPDATE tasks SET status = $1 WHERE id = $2')
-    _row_factory = staticmethod(psycopg.rows.scalar_row)
+
+    _row_factory = builtins.staticmethod(psycopg.rows.scalar_row)
 
     async def execute(self, *, status: MydbTaskStatus, task_id: uuid.UUID) -> None:
         async with self._client_cursor((status, task_id)):
@@ -167,10 +176,12 @@ class Query_12e061f7aa94bf484295ab0018520059(Query[None]):
 
 class Query_46242a02ffe365dc17851a034fdc1d30(Query[MydbUser]):
     _locations = ('example/main.py:87',)
-    _stmt = psycopg.sql.SQL('SELECT id, username, email, created_at FROM users ORDER BY created_at')
-    _row_factory = staticmethod(psycopg.rows.class_row(MydbUser))
 
-    async def query_all_rows(self) -> list[MydbUser]:
+    _stmt = psycopg.sql.SQL('SELECT id, username, email, created_at FROM users ORDER BY created_at')
+
+    _row_factory = builtins.staticmethod(psycopg.rows.class_row(MydbUser))
+
+    async def query_all_rows(self) -> builtins.list[MydbUser]:
         async with self._client_cursor(None) as cur:
             return await cur.fetchall()
 
@@ -188,10 +199,12 @@ class Query_46242a02ffe365dc17851a034fdc1d30(Query[MydbUser]):
 
 class Query_41cb2f3cea216a76ba87b6ddb70e6be5(Query[MydbUser]):
     _locations = ('example/main.py:93', 'example/main.py:146')
-    _stmt = psycopg.sql.SQL('SELECT id, username, email, created_at FROM users WHERE id = $1')
-    _row_factory = staticmethod(psycopg.rows.class_row(MydbUser))
 
-    async def query_all_rows(self, *, user_id: uuid.UUID) -> list[MydbUser]:
+    _stmt = psycopg.sql.SQL('SELECT id, username, email, created_at FROM users WHERE id = $1')
+
+    _row_factory = builtins.staticmethod(psycopg.rows.class_row(MydbUser))
+
+    async def query_all_rows(self, *, user_id: uuid.UUID) -> builtins.list[MydbUser]:
         async with self._client_cursor((user_id,)) as cur:
             return await cur.fetchall()
 
@@ -209,10 +222,12 @@ class Query_41cb2f3cea216a76ba87b6ddb70e6be5(Query[MydbUser]):
 
 class Query_ce9822661c2a7e0e716755087929ebd9(Query[MydbTask]):
     _locations = ('example/main.py:99', 'example/main.py:111', 'example/main.py:153')
-    _stmt = psycopg.sql.SQL('SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\nFROM tasks\nWHERE project_id = $1 AND ($2::task_status IS NULL OR status = $2)')
-    _row_factory = staticmethod(psycopg.rows.class_row(MydbTask))
 
-    async def query_all_rows(self, *, project_id: uuid.UUID, status: MydbTaskStatus | None) -> list[MydbTask]:
+    _stmt = psycopg.sql.SQL('SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\nFROM tasks\nWHERE project_id = $1 AND ($2::task_status IS NULL OR status = $2)')
+
+    _row_factory = builtins.staticmethod(psycopg.rows.class_row(MydbTask))
+
+    async def query_all_rows(self, *, project_id: uuid.UUID, status: MydbTaskStatus | None) -> builtins.list[MydbTask]:
         async with self._client_cursor((project_id, status)) as cur:
             return await cur.fetchall()
 
@@ -230,10 +245,12 @@ class Query_ce9822661c2a7e0e716755087929ebd9(Query[MydbTask]):
 
 class Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount(Query[TaskStatusCount]):
     _locations = ('example/main.py:124',)
-    _stmt = psycopg.sql.SQL('SELECT status, count(*) AS task_count\nFROM tasks WHERE project_id = $1\nGROUP BY status ORDER BY status')
-    _row_factory = staticmethod(psycopg.rows.class_row(TaskStatusCount))
 
-    async def query_all_rows(self, *, project_id: uuid.UUID) -> list[TaskStatusCount]:
+    _stmt = psycopg.sql.SQL('SELECT status, count(*) AS task_count\nFROM tasks WHERE project_id = $1\nGROUP BY status ORDER BY status')
+
+    _row_factory = builtins.staticmethod(psycopg.rows.class_row(TaskStatusCount))
+
+    async def query_all_rows(self, *, project_id: uuid.UUID) -> builtins.list[TaskStatusCount]:
         async with self._client_cursor((project_id,)) as cur:
             return await cur.fetchall()
 
@@ -251,47 +268,51 @@ class Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount(Query[TaskStatusCou
 
 class Query_07cbb3e5226e35adbd17171f38ab7216(Query[uuid.UUID]):
     _locations = ('example/main.py:136',)
-    _stmt = psycopg.sql.SQL('SELECT id FROM tasks WHERE project_id = $1 AND title = $2')
-    _row_factory = staticmethod(runtime.typed_scalar_row(uuid.UUID, not_null=True))
 
-    async def query_all_rows(self, *, project_id: uuid.UUID, title: str) -> list[uuid.UUID]:
+    _stmt = psycopg.sql.SQL('SELECT id FROM tasks WHERE project_id = $1 AND title = $2')
+
+    _row_factory = builtins.staticmethod(runtime.typed_scalar_row(uuid.UUID, not_null=True))
+
+    async def query_all_rows(self, *, project_id: uuid.UUID, title: builtins.str) -> builtins.list[uuid.UUID]:
         async with self._client_cursor((project_id, title)) as cur:
             return await cur.fetchall()
 
-    async def query_single_row(self, *, project_id: uuid.UUID, title: str) -> uuid.UUID:
+    async def query_single_row(self, *, project_id: uuid.UUID, title: builtins.str) -> uuid.UUID:
         async with self._client_cursor((project_id, title)) as cur:
             return runtime.get_one_row(await cur.fetchmany(2))
 
-    async def query_optional_row(self, *, project_id: uuid.UUID, title: str) -> uuid.UUID | None:
+    async def query_optional_row(self, *, project_id: uuid.UUID, title: builtins.str) -> uuid.UUID | None:
         async with self._client_cursor((project_id, title)) as cur:
             return runtime.get_one_row_or_none(await cur.fetchmany(2))
 
-    def query_stream(self, *, project_id: uuid.UUID, title: str) -> AbstractAsyncContextManager[AsyncIterator[uuid.UUID]]:
+    def query_stream(self, *, project_id: uuid.UUID, title: builtins.str) -> AbstractAsyncContextManager[AsyncIterator[uuid.UUID]]:
         return self._server_cursor((project_id, title))
 
 
-class Query_29c838280e39383dd6b0760431eb3e60(Query[int]):
+class Query_29c838280e39383dd6b0760431eb3e60(Query[builtins.int]):
     _locations = ('example/main.py:174',)
-    _stmt = psycopg.sql.SQL('SELECT count(*) FROM tasks WHERE status = $1')
-    _row_factory = staticmethod(runtime.typed_scalar_row(int, not_null=True))
 
-    async def query_all_rows(self, *, status: MydbTaskStatus) -> list[int]:
+    _stmt = psycopg.sql.SQL('SELECT count(*) FROM tasks WHERE status = $1')
+
+    _row_factory = builtins.staticmethod(runtime.typed_scalar_row(builtins.int, not_null=True))
+
+    async def query_all_rows(self, *, status: MydbTaskStatus) -> builtins.list[builtins.int]:
         async with self._client_cursor((status,)) as cur:
             return await cur.fetchall()
 
-    async def query_single_row(self, *, status: MydbTaskStatus) -> int:
+    async def query_single_row(self, *, status: MydbTaskStatus) -> builtins.int:
         async with self._client_cursor((status,)) as cur:
             return runtime.get_one_row(await cur.fetchmany(2))
 
-    async def query_optional_row(self, *, status: MydbTaskStatus) -> int | None:
+    async def query_optional_row(self, *, status: MydbTaskStatus) -> builtins.int | None:
         async with self._client_cursor((status,)) as cur:
             return runtime.get_one_row_or_none(await cur.fetchmany(2))
 
-    def query_stream(self, *, status: MydbTaskStatus) -> AbstractAsyncContextManager[AsyncIterator[int]]:
+    def query_stream(self, *, status: MydbTaskStatus) -> AbstractAsyncContextManager[AsyncIterator[builtins.int]]:
         return self._server_cursor((status,))
 
 
-_QUERIES: dict[str, type[Query[Any]]] = {
+_QUERIES: builtins.dict[builtins.str, builtins.type[Query[Any]]] = {
     '\n            INSERT INTO users (id, username, email)\n            VALUES (@id, @username, @email)\n            ': Query_3ee53b6909da8b4496346dda36c9f442,
     '\n            INSERT INTO projects (id, name, owner_id, settings)\n            VALUES (@id, @name, @owner_id, @settings)\n            ': Query_67ac0768d48a654b1a305124c92372e8,
     '\n        INSERT INTO tasks (id, project_id, title, priority, assignee_id, metadata, due_date)\n        VALUES (@id, @project_id, @title, @priority, @assignee_id?, @metadata?, @due_date?)\n        ': Query_bd4c62c78a942bfd1f087f87a19f2743,
@@ -326,11 +347,14 @@ def mydb_sql(sql: Literal['SELECT id FROM tasks WHERE project_id = @project_id A
 @overload
 def mydb_sql(sql: Literal['SELECT count(*) FROM tasks WHERE status = @status']) -> Query_29c838280e39383dd6b0760431eb3e60: ...
 @overload
-def mydb_sql(sql: str) -> Query[Any]: ...
+def mydb_sql(sql: builtins.str) -> Query[Any]: ...
 
 
-def mydb_sql(sql: str, row_type: str | None = None) -> Query[Any]:
+def mydb_sql(
+    sql: builtins.str,
+    row_type: builtins.str | None = None,
+) -> Query[Any]:
     if sql in _QUERIES:
         return _QUERIES[sql]()
     msg = f"Unknown statement: {sql!r}"
-    raise KeyError(msg)
+    raise builtins.KeyError(msg)

@@ -1,0 +1,18 @@
+from tests.generated.query_execution.testdb import testdb_sql
+
+testdb_sql("SELECT id FROM users ORDER BY created_at")
+testdb_sql("SELECT * FROM users WHERE id = $1")
+testdb_sql("SELECT id, username FROM users WHERE id=$1", row_type="UserMini")
+testdb_sql("INSERT INTO users (id, username, is_active) VALUES ($1, $2, $3)")
+testdb_sql("SELECT id, username, is_active FROM users WHERE id = $1")
+testdb_sql("""INSERT INTO users (id, username, metadata)
+VALUES ($1, $2, $3) RETURNING metadata""")
+testdb_sql("INSERT INTO json_payloads (payload) VALUES ($1) RETURNING payload")
+testdb_sql("SELECT 1")
+testdb_sql("SELECT * FROM users WHERE username = $1")
+testdb_sql("INSERT INTO users (id, username) VALUES ($1, $2)")
+testdb_sql("INSERT INTO users (id, username) VALUES ($1, 'tx_user')")
+testdb_sql("SELECT count(*) as cnt FROM users WHERE username = 'tx_user'")
+testdb_sql("SELECT username FROM users WHERE id = $1")
+testdb_sql("INSERT INTO users (id, username) VALUES ($1, 'rollback_user')")
+testdb_sql("SELECT count(*) as cnt FROM users WHERE username = 'rollback_user'")

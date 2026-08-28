@@ -1,11 +1,13 @@
+from __future__ import annotations
+
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING
+from typing import cast
 from unittest.mock import AsyncMock
 
-import psycopg
 import pytest
 
 from iron_sql.runtime import ConnectionPool
@@ -16,8 +18,15 @@ from iron_sql.runtime import register_enums
 from iron_sql.runtime import typed_array_row
 from iron_sql.runtime import typed_json_scalar_row
 from iron_sql.runtime import typed_scalar_row
-from tests.conftest import ProjectBuilder
 from tests.json_models import UserMetadata
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing import Any
+
+    import psycopg
+
+    from tests.conftest import ProjectBuilder
 
 # =============================================================================
 # json_validated decorator
@@ -31,7 +40,8 @@ def test_json_validated_applies_validation() -> None:
         metadata: UserMetadata
         other: int
 
-    row = Row(metadata='{"key": "lang", "value": "en"}', other=42)  # type: ignore[reportArgumentType]
+    raw_row = cast("Callable[..., Row]", Row)
+    row = raw_row(metadata='{"key": "lang", "value": "en"}', other=42)
     assert isinstance(row.metadata, UserMetadata)
     assert row.metadata.key == "lang"
     assert row.other == 42
@@ -47,7 +57,8 @@ def test_json_validated_chains_existing_post_init() -> None:
         def __post_init__(self) -> None:
             self.extra = "post_init_ran"
 
-    row = Row(metadata={"key": "k", "value": "v"}, extra="ignored")  # type: ignore[reportArgumentType]
+    raw_row = cast("Callable[..., Row]", Row)
+    row = raw_row(metadata={"key": "k", "value": "v"}, extra="ignored")
     assert isinstance(row.metadata, UserMetadata)
     assert row.extra == "post_init_ran"
 

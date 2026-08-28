@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import AsyncGenerator
 
 import psycopg
 import pytest
@@ -8,28 +9,49 @@ from iron_sql.runtime import execute_listen
 from iron_sql.runtime import execute_unlisten
 from iron_sql.runtime import listen
 from iron_sql.runtime import notify
-from tests.conftest import ProjectBuilder
+from tests.conftest import SCHEMA_SQL
+from tests.conftest import GeneratedTestDB
+from tests.conftest import generated_package
+
+generated_package(
+    "listen_notify",
+    schema=SCHEMA_SQL,
+    queries="""
+        from tests.generated.listen_notify.testdb import testdb_sql
+
+        testdb_sql("SELECT 1")
+    """,
+)
+
+from tests.generated.listen_notify import testdb
+
+
+@pytest.fixture
+async def use_generated_database(
+    generated_test_db: GeneratedTestDB,
+) -> AsyncGenerator[None]:
+    async with generated_test_db("listen_notify"):
+        yield
+
 
 # =============================================================================
 # Unit test: codegen
 # =============================================================================
 
 
-def test_codegen_listen_notify_helpers(test_project: ProjectBuilder) -> None:
-    test_project.add_query("q", "SELECT 1")
-    mod = test_project.generate()
+@pytest.mark.usefixtures("use_generated_database")
+def test_codegen_listen_notify_helpers() -> None:
+    mod = testdb
 
     assert hasattr(mod, "testdb_listen_session")
     assert not hasattr(mod, "testdb_listen")
     assert hasattr(mod, "testdb_notify")
 
 
-async def test_generated_listen_session_does_not_block_context_queries(
-    test_project: ProjectBuilder,
-) -> None:
+@pytest.mark.usefixtures("use_generated_database")
+async def test_generated_listen_session_does_not_block_context_queries() -> None:
     stmt = "SELECT 1"
-    test_project.add_query("q", stmt)
-    mod = test_project.generate()
+    mod = testdb
     channel = "test_codegen_listen_session"
 
     async with (

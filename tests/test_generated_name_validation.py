@@ -1,16 +1,18 @@
+from __future__ import annotations
+
 import ast
 import builtins
-import json
-import subprocess
+import inspect
 import symtable
 import sys
-import tomllib
 import uuid
 from pathlib import Path
 from types import ModuleType
+from typing import TYPE_CHECKING
 from typing import cast
 
 import pytest
+from pydantic import BaseModel
 from pydantic import alias_generators
 
 from iron_sql.codegen import generate_sql_module
@@ -20,13 +22,21 @@ from iron_sql.codegen.generator import ParamSpec
 from iron_sql.codegen.generator import mangle_class_name
 from iron_sql.codegen.generator import query_method_scope_specs
 from iron_sql.codegen.generator import render_query_class
-from tests.conftest import ProjectBuilder
 from tests.generated_oracles import assert_query_source_namespaces
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable
+    from collections.abc import Callable
+    from contextlib import AbstractAsyncContextManager
+    from typing import Any
+
+    import psycopg
+
+    from tests.conftest import ProjectBuilder
 
 _USER_METADATA_REF = JSONModelRef(
     module_path="tests",
     class_path="json_models.UserMetadata",
-    alias="tests",
     origin="test JSON model",
 )
 
@@ -36,10 +46,12 @@ def write_json_model_module(test_project: ProjectBuilder, root: str) -> None:
     package.mkdir(parents=True)
     (package / "__init__.py").touch()
     (package / "models.py").write_text(
-        "from pydantic import BaseModel\n\n"
-        "class Payload(BaseModel):\n"
-        "    key: str\n"
-        "    value: str\n",
+        """from pydantic import BaseModel
+
+class Payload(BaseModel):
+    key: str
+    value: str
+""",
         encoding="utf-8",
     )
 
@@ -108,33 +120,43 @@ def test_parameter_collides_only_with_external_names_read_by_method(
     assert "queries.py:4" in message
 
 
-def test_json_module_root_is_isolated_from_generated_module_bindings(
+def test_json_module_root_cannot_replace_generated_module_binding(
     test_project: ProjectBuilder,
 ) -> None:
     write_json_model_module(test_project, "runtime")
     test_project.add_query("q", "UPDATE users SET metadata = $1")
 
-    changed, _ = test_project.generate_checked(
-        json_model_overrides={"users.metadata": "runtime.models:Payload"}
-    )
-    assert changed is True
-    generated = (
-        test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
-    ).read_text(encoding="utf-8")
+    with pytest.raises(
+        ValueError, match=r"^Invalid generated Python names:"
+    ) as exc_info:
+        test_project.generate_no_import(
+            json_model_overrides={"users.metadata": "runtime.models:Payload"}
+        )
 
-    assert "import runtime.models as _iron_sql_json_0" in generated
-    assert "_iron_sql_json_0.Payload" in generated
+    message = str(exc_info.value)
+    assert "module" in message
+    assert "'runtime' is claimed more than once" in message
+    assert "generated import runtime" in message
+    assert "json_model_overrides['users.metadata']" in message
 
 
-def test_json_module_root_matching_parameter_is_isolated(
+def test_json_module_root_cannot_be_shadowed_by_parameter(
     test_project: ProjectBuilder,
 ) -> None:
     test_project.add_query("q", "UPDATE users SET metadata = @tests")
 
-    changed, _ = test_project.generate_checked(
-        json_model_overrides={"users.metadata": "tests.json_models:UserMetadata"}
-    )
-    assert changed is True
+    with pytest.raises(
+        ValueError, match=r"^Invalid generated Python names:"
+    ) as exc_info:
+        test_project.generate_no_import(
+            json_model_overrides={"users.metadata": "tests.json_models:UserMetadata"}
+        )
+
+    message = str(exc_info.value)
+    assert "method Query_" in message
+    assert ".execute: 'tests' is claimed more than once" in message
+    assert "generated method body external read" in message
+    assert "queries.py:4" in message
 
 
 def test_same_names_are_safe_in_independent_scopes(
@@ -156,29 +178,25 @@ q4 = testdb_sql("SELECT username AS self, email AS runtime, id AS psycopg FROM u
     assert changed is True
 
 
-async def test_json_module_named_cur_is_not_shadowed_by_cursor_local(
+def test_json_module_root_cannot_be_shadowed_by_cursor_local(
     test_project: ProjectBuilder,
 ) -> None:
     write_json_model_module(test_project, "cur")
     sql = "UPDATE users SET metadata = @payload WHERE id = @id RETURNING id"
     test_project.add_query("q", sql)
-    module = test_project.generate(
-        json_model_overrides={"users.metadata": "cur.models:Payload"}
-    )
-    payload_type = __import__("cur.models", fromlist=["Payload"]).Payload
-    user_id = uuid.uuid4()
-    async with module.testdb_connection() as connection:
-        await connection.execute(
-            "INSERT INTO users (id, username) VALUES (%s, %s)",
-            (user_id, "cur-root"),
+
+    with pytest.raises(
+        ValueError, match=r"^Invalid generated Python names:"
+    ) as exc_info:
+        test_project.generate_no_import(
+            json_model_overrides={"users.metadata": "cur.models:Payload"}
         )
 
-    assert (
-        await module.testdb_sql(sql).query_single_row(
-            payload=payload_type(key="k", value="v"), id=user_id
-        )
-        == user_id
-    )
+    message = str(exc_info.value)
+    assert "method Query_" in message
+    assert "'cur' is claimed more than once" in message
+    assert "generated cursor local" in message
+    assert "generated method body external read" in message
 
 
 async def test_scalar_json_module_named_like_old_lambda_parameter(
@@ -190,16 +208,29 @@ async def test_scalar_json_module_named_like_old_lambda_parameter(
     module = test_project.generate(
         json_model_overrides={"users.metadata": "_v.models:Payload"}
     )
+    namespace = cast("dict[str, object]", vars(module))
+    connection_factory = cast(
+        "Callable[[], AbstractAsyncContextManager[psycopg.AsyncConnection[Any]]]",
+        namespace["testdb_connection"],
+    )
+    testdb_sql = cast("Callable[..., object]", namespace["testdb_sql"])
     user_id = uuid.uuid4()
-    async with module.testdb_connection() as connection:
+    async with connection_factory() as connection:
         await connection.execute(
             "INSERT INTO users (id, username, metadata) VALUES (%s, %s, %s)",
             (user_id, "lambda-root", '{"key": "k", "value": "v"}'),
         )
 
-    value = await module.testdb_sql(sql).query_single_row(id=user_id)
-    assert value.key == "k"
-    assert value.value == "v"
+    query = testdb_sql(sql)
+    query_single_row_name = "query_single_row"
+    query_single_row = cast(
+        "Callable[..., Awaitable[object]]", getattr(query, query_single_row_name)
+    )
+    value = await query_single_row(id=user_id)
+    assert isinstance(value, BaseModel)
+    fields = cast("dict[str, object]", vars(value))
+    assert fields["key"] == "k"
+    assert fields["value"] == "v"
 
 
 def test_parameter_named_cur_remains_valid(test_project: ProjectBuilder) -> None:
@@ -573,7 +604,9 @@ def test_generated_class_may_use_scaffold_builtin_name(
 
     module = test_project.generate()
 
-    assert getattr(module, row_type).__name__ == row_type
+    generated_class = cast("object", vars(module)[row_type])
+    assert inspect.isclass(generated_class)
+    assert generated_class.__name__ == row_type
 
 
 async def test_generated_enum_members_are_validated_after_rendering_names(
@@ -607,9 +640,11 @@ def test_output_module_validates_every_dotted_path_component(
     changed, _ = test_project.generate_checked()
     assert changed is True
     (test_project.app_dir / "queries.py").write_text(
-        "from typing import Any\n"
-        "def class_sql(q: str, **kwargs: Any) -> Any: ...\n\n"
-        'q = class_sql("SELECT 1")\n',
+        """from typing import Any
+def class_sql(q: str, **kwargs: Any) -> Any: ...
+
+q = class_sql("SELECT 1")
+""",
         encoding="utf-8",
     )
     invalid_module_name = f"{test_project.app_pkg}.class"
@@ -819,7 +854,9 @@ def test_last_query_stream_binding_can_match_result_type(
 
     module = test_project.generate()
 
-    assert module.query_stream.__name__ == "query_stream"
+    query_stream = cast("object", vars(module)["query_stream"])
+    assert inspect.isclass(query_stream)
+    assert query_stream.__name__ == "query_stream"
 
 
 def test_module_expression_walrus_binding_conflict_is_rejected_before_write(
@@ -942,7 +979,7 @@ def test_safe_module_expression_walrus_binding_is_emitted(
     module = test_project.import_generated()
 
     assert changed is True
-    assert module.selected_dsn == test_project.dsn
+    assert vars(module)["selected_dsn"] == test_project.dsn
 
 
 def test_module_expression_binding_conflicts_with_second_expression(
@@ -1012,79 +1049,3 @@ def test_module_expression_read_reports_original_nfkc_spelling(
             src_path=test_project.src_path,
             tempdir_path=test_project.src_path,
         )
-
-
-def test_generated_contract_corpus_passes_basedpyright(
-    test_project: ProjectBuilder,
-) -> None:
-    (test_project.app_dir / "config.py").write_text(
-        f"""from collections.abc import Callable
-
-DSN_VALUES: list[str] = ["{test_project.dsn}"]
-
-def choose(factory: Callable[[], str]) -> str:
-    return factory()
-""",
-        encoding="utf-8",
-    )
-    test_project.add_query("execute", "UPDATE users SET username = @username")
-    test_project.add_query("row", "SELECT id, username FROM users")
-    test_project.add_query("json_scalar", "SELECT metadata FROM users")
-    test_project.add_query("json_row", "SELECT id, metadata FROM users")
-    test_project.add_query("enum", "SELECT 'active'::user_status AS status")
-    test_project.write_queries()
-    if str(test_project.src_path) not in sys.path:
-        sys.path.insert(0, str(test_project.src_path))
-
-    dsn_expression = ":".join((
-        f"{test_project.app_pkg}.config",
-        "choose(lambda: [dsn for dsn in DSN_VALUES][0])",
-    ))
-    generate_sql_module(
-        schema_path=Path("schema.sql"),
-        module_full_name=test_project.module_full_name,
-        dsn_expr=dsn_expression,
-        json_model_overrides={"users.metadata": "tests.json_models:UserMetadata"},
-        src_path=test_project.src_path,
-        tempdir_path=test_project.src_path,
-    )
-    test_project.import_generated()
-    target_path = (
-        test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
-    )
-    repository_root = Path.cwd()
-    project_config = tomllib.loads(
-        (repository_root / "pyproject.toml").read_text(encoding="utf-8")
-    )
-    pyright_config = cast(
-        "dict[str, object]",
-        cast("dict[str, object]", project_config["tool"])["pyright"],
-    )
-    pyright_config["extraPaths"] = [
-        str(repository_root),
-        str(test_project.src_path),
-    ]
-    pyright_config_path = test_project.src_path / "pyrightconfig.json"
-    pyright_config_path.write_text(json.dumps(pyright_config), encoding="utf-8")
-
-    completed = subprocess.run(
-        [
-            "uv",
-            "run",
-            "basedpyright",
-            "--project",
-            str(pyright_config_path),
-            "--outputjson",
-            str(target_path),
-        ],
-        cwd=test_project.src_path,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    report = json.loads(completed.stdout)
-
-    assert completed.returncode == 0, completed.stdout
-    assert report["summary"]["errorCount"] == 0
-    assert report["summary"]["warningCount"] == 0
-    assert report["summary"]["filesAnalyzed"] == 1

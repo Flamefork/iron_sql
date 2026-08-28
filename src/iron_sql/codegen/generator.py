@@ -17,6 +17,8 @@ from collections.abc import Callable
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
+from typing import override
 
 import inflection
 from psycopg.sql import Identifier
@@ -34,21 +36,26 @@ from iron_sql.codegen.util import write_if_changed
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_SRC_PATH = Path()
+
 
 @dataclass(kw_only=True, frozen=True)
 class JSONModelRef:
     module_path: str
     class_path: str
-    alias: str
     origin: str = dataclasses.field(compare=False, repr=False)
 
     @property
     def expression(self) -> str:
-        return f"{self.alias}.{self.class_path}"
+        return f"{self.module_path}.{self.class_path}"
 
     @property
     def import_statement(self) -> str:
-        return f"import {self.module_path} as {self.alias}"
+        return f"import {self.module_path}"
+
+    @property
+    def binding(self) -> str:
+        return self.module_path.partition(".")[0]
 
 
 @dataclass(kw_only=True, frozen=True)
@@ -198,7 +205,7 @@ class ModuleExprRef:
 
     def evaluate[T](self, *, expected_type: type[T]) -> T:
         mod = importlib.import_module(self.module_name)
-        value = eval(self.module_expr, vars(mod))  # noqa: S307
+        value = cast("object", eval(self.module_expr, vars(mod)))  # noqa: S307
         if not isinstance(value, expected_type):
             msg = (
                 f"module expression {self.module_name}:{self.module_expr} "
@@ -365,6 +372,7 @@ def validate_type_overrides(overrides: dict[str, str], sqlc_res: SQLCResult) -> 
 
 
 class BuiltinNameQualifier(ast.NodeTransformer):
+    @override
     def visit_Name(self, node: ast.Name) -> ast.expr:
         if isinstance(node.ctx, ast.Load) and hasattr(builtins, node.id):
             return ast.copy_location(
@@ -384,7 +392,7 @@ def normalize_type_override_expression(expression: str) -> str:
     except SyntaxError as exc:
         msg = f"invalid type_overrides expression {expression!r}: {exc.msg}"
         raise ValueError(msg) from exc
-    normalized = BuiltinNameQualifier().visit(parsed)
+    normalized = cast("ast.Expression", BuiltinNameQualifier().visit(parsed))
     ast.fix_missing_locations(normalized)
     roots = {
         node.id
@@ -432,7 +440,7 @@ def generate_sql_module(  # noqa: PLR0913, PLR0914
     to_pascal_fn: Callable[[str], str] = alias_generators.to_pascal,
     to_snake_fn: Callable[[str], str] = alias_generators.to_snake,
     debug_path: Path | None = None,
-    src_path: Path = Path(),
+    src_path: Path = _DEFAULT_SRC_PATH,
     tempdir_path: Path | None = None,
 ) -> bool:
     module_name = module_full_name.rsplit(".", maxsplit=1)[-1]
@@ -710,10 +718,9 @@ def resolve_json_model_overrides(
         (module_path, class_path): JSONModelRef(
             module_path=module_path,
             class_path=class_path,
-            alias=f"_iron_sql_json_{index}",
             origin="; ".join(origins_by_path[module_path, class_path]),
         )
-        for index, (module_path, class_path) in enumerate(import_paths)
+        for module_path, class_path in import_paths
     }
     column_refs = {
         key: refs_by_path[module_path, class_path]
@@ -831,13 +838,6 @@ def query_method_required_external_reads(method_name: str) -> tuple[str, ...]:
     return _QUERY_METHOD_EXTERNAL_READS[method_name]
 
 
-def is_query_method_external_read(name: str) -> bool:
-    return (
-        name in {"runtime", "psycopg"}
-        or re.fullmatch(r"_iron_sql_json_[0-9]+", name) is not None
-    )
-
-
 def build_module_import_specs(
     dsn_ref: ModuleExprRef,
     pool_options_ref: ModuleExprRef | None,
@@ -858,11 +858,17 @@ def build_module_import_specs(
             )
             for name in ref.import_names
         )
+    json_origins_by_binding = {
+        model.binding: "; ".join(
+            ref.origin for ref in json_models if ref.binding == model.binding
+        )
+        for model in json_models
+    }
     specs.extend(
         ModuleImportSpec(
             source=model.import_statement,
-            binding=model.alias,
-            origin=f"JSON model import {model.module_path!r}",
+            binding=model.binding,
+            origin=json_origins_by_binding[model.binding],
         )
         for model in json_models
     )
@@ -954,7 +960,7 @@ def query_method_external_reads(
     for param in query_params:
         if param.json_model is not None:
             reads.add("runtime")
-            reads.add(param.json_model.alias)
+            reads.add(param.json_model.binding)
         if param.db_type in {"json", "jsonb"}:
             reads.add("psycopg")
     return tuple(sorted(reads))

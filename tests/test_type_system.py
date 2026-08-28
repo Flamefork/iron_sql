@@ -1,31 +1,101 @@
+from __future__ import annotations
+
 import datetime
 import decimal
 import inspect
 import ipaddress
 import warnings
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING
 from typing import LiteralString
+from typing import cast
 from typing import get_args
 
 import pytest
 
 from iron_sql.codegen import UnknownSQLTypeWarning
 from iron_sql.runtime import ConnectionPool
-from tests.conftest import ProjectBuilder
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable
+    from collections.abc import Callable
+    from collections.abc import Set as AbstractSet
+    from contextlib import AbstractAsyncContextManager
+    from types import ModuleType
+
+    import psycopg
+
+    from tests.conftest import ProjectBuilder
 
 
-def query_signature(query: Any) -> inspect.Signature:
-    return inspect.signature(query.__class__.query_single_row)
+def module_value(module: ModuleType, name: str) -> object:
+    return cast("dict[str, object]", vars(module))[name]
 
 
-def annotation_types(annotation: Any) -> set[Any]:
-    args = get_args(annotation)
-    return {a for a in args if a is not type(None)} if args else {annotation}
+def generated_enum(module: ModuleType, name: str) -> type[StrEnum]:
+    value = module_value(module, name)
+    if not inspect.isclass(value) or not issubclass(value, StrEnum):
+        msg = f"{module.__name__}.{name} is not a StrEnum"
+        raise TypeError(msg)
+    return value
 
 
-def assert_return_types(query: Any, expected: set[type]) -> None:
-    assert annotation_types(query_signature(query).return_annotation) == expected
+def generated_class(module: ModuleType, name: str) -> type[object]:
+    value = module_value(module, name)
+    if not inspect.isclass(value):
+        msg = f"{module.__name__}.{name} is not a class"
+        raise TypeError(msg)
+    return value
+
+
+def sql_query(module: ModuleType, sql: str) -> object:
+    dispatcher = cast("Callable[[str], object]", module_value(module, "testdb_sql"))
+    return dispatcher(sql)
+
+
+async def query_single_row(
+    module: ModuleType,
+    sql: str,
+    *params: object,
+    **named_params: object,
+) -> object:
+    return await query_single_row_for(sql_query(module, sql), *params, **named_params)
+
+
+async def query_single_row_for(
+    query: object, *params: object, **named_params: object
+) -> object:
+    method_name = "query_single_row"
+    method = cast("Callable[..., Awaitable[object]]", getattr(query, method_name))
+    return await method(*params, **named_params)
+
+
+def generated_connection(
+    module: ModuleType,
+) -> AbstractAsyncContextManager[psycopg.AsyncConnection[object]]:
+    factory = cast(
+        "Callable[[], AbstractAsyncContextManager[psycopg.AsyncConnection[object]]]",
+        module_value(module, "testdb_connection"),
+    )
+    return factory()
+
+
+def query_signature(query: object) -> inspect.Signature:
+    method = cast("object", vars(type(query))["query_single_row"])
+    if not callable(method):
+        msg = f"{type(query).__name__}.query_single_row is not callable"
+        raise TypeError(msg)
+    return inspect.signature(method)
+
+
+def annotation_types(annotation: object) -> set[object]:
+    args = cast("tuple[object, ...]", get_args(annotation))
+    return {item for item in args if item is not type(None)} if args else {annotation}
+
+
+def assert_return_types(query: object, expected: AbstractSet[object]) -> None:
+    returned = cast("object", query_signature(query).return_annotation)
+    assert annotation_types(returned) == expected
 
 
 async def test_enum_generation(test_project: ProjectBuilder) -> None:
@@ -36,18 +106,16 @@ async def test_enum_generation(test_project: ProjectBuilder) -> None:
 
     mod = test_project.generate()
 
-    assert hasattr(mod, "TestdbUserStatus")
-    enum_cls = mod.TestdbUserStatus
-    assert issubclass(enum_cls, StrEnum)
+    enum_cls = generated_enum(mod, "TestdbUserStatus")
 
-    assert enum_cls.ACTIVE == "active"  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
-    assert enum_cls.INACTIVE == "inactive"  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
+    active = enum_cls["ACTIVE"]
+    inactive = enum_cls["INACTIVE"]
+    assert active == "active"
+    assert inactive == "inactive"
 
-    row = await mod.testdb_sql(
-        "SELECT 'active'::user_status as status"
-    ).query_single_row()
+    row = await query_single_row(mod, "SELECT 'active'::user_status as status")
     assert isinstance(row, enum_cls)
-    assert row == enum_cls.ACTIVE  # pyright: ignore[reportAttributeAccessIssue]
+    assert row == active
     assert row == "active"  # StrEnum acts as str
 
 
@@ -56,13 +124,14 @@ async def test_enum_parameter(test_project: ProjectBuilder) -> None:
     test_project.add_query("echo_status", sql)
 
     mod = test_project.generate()
-    enum_cls = mod.TestdbUserStatus
+    enum_cls = generated_enum(mod, "TestdbUserStatus")
+    active = enum_cls["ACTIVE"]
 
-    idx = await mod.testdb_sql(sql).query_single_row(enum_cls.ACTIVE)
-    assert idx == enum_cls.ACTIVE
+    idx = await query_single_row(mod, sql, active)
+    assert idx == active
 
-    idx = await mod.testdb_sql(sql).query_single_row("active")
-    assert idx == enum_cls.ACTIVE
+    idx = await query_single_row(mod, sql, "active")
+    assert idx == active
 
 
 async def test_entity_generation_with_enum(test_project: ProjectBuilder) -> None:
@@ -80,16 +149,17 @@ async def test_entity_generation_with_enum(test_project: ProjectBuilder) -> None
 
     mod = test_project.generate()
 
-    enum_cls = mod.TestdbUserStatus
-    entity_cls = mod.TestdbEnumTestTable
+    enum_cls = generated_enum(mod, "TestdbUserStatus")
+    entity_cls = generated_class(mod, "TestdbEnumTestTable")
+    annotations = cast("dict[str, object]", inspect.get_annotations(entity_cls))
 
-    assert entity_cls.__annotations__["status"] is enum_cls
+    assert annotations["status"] is enum_cls
 
-    tags_annotation = entity_cls.__annotations__["tags"]
-    tag_args = get_args(tags_annotation)
+    tags_annotation = annotations["tags"]
+    tag_args = cast("tuple[object, ...]", get_args(tags_annotation))
     # Sequence[EnumCls] | None — unwrap the union
-    seq_type = next(a for a in tag_args if a is not type(None))
-    (inner_type,) = get_args(seq_type)
+    seq_type = next(item for item in tag_args if item is not type(None))
+    (inner_type,) = cast("tuple[object]", get_args(seq_type))
     assert inner_type is enum_cls
 
 
@@ -117,7 +187,7 @@ async def test_single_array_column_result_roundtrip(
     assert "runtime.typed_array_row(builtins.int, not_null=True)" in generated
     assert "runtime.typed_array_row(builtins.int, not_null=False)" in generated
 
-    async with mod.testdb_connection() as conn:
+    async with generated_connection(mod) as conn:
         await conn.execute(
             "INSERT INTO array_results (id, scores, extra) VALUES (%s, %s, %s)",
             (1, [1, 2, 3], None),
@@ -127,9 +197,9 @@ async def test_single_array_column_result_roundtrip(
             (2, [4], [5, 6]),
         )
 
-    assert await mod.testdb_sql(not_null_sql).query_single_row(1) == [1, 2, 3]
-    assert await mod.testdb_sql(nullable_sql).query_single_row(1) is None
-    assert await mod.testdb_sql(nullable_sql).query_single_row(2) == [5, 6]
+    assert await query_single_row(mod, not_null_sql, 1) == [1, 2, 3]
+    assert await query_single_row(mod, nullable_sql, 1) is None
+    assert await query_single_row(mod, nullable_sql, 2) == [5, 6]
 
 
 async def test_enum_resolves_to_instances_in_all_result_positions(
@@ -151,24 +221,32 @@ async def test_enum_resolves_to_instances_in_all_result_positions(
     test_project.add_query("get_tags", array_sql)
 
     mod = test_project.generate()
-    status_enum = mod.TestdbUserStatus
+    status_enum = generated_enum(mod, "TestdbUserStatus")
+    active = status_enum["ACTIVE"]
+    inactive = status_enum["INACTIVE"]
 
-    async with mod.testdb_connection() as conn:
+    async with generated_connection(mod) as conn:
         await conn.execute(
             "INSERT INTO enum_results (id, status, tags) VALUES (%s, %s, %s)",
-            (1, status_enum.ACTIVE, [status_enum.ACTIVE, status_enum.INACTIVE]),
+            (1, active, [active, inactive]),
         )
 
-    row = await mod.testdb_sql(multi_sql).query_single_row(1)
-    assert row.status is status_enum.ACTIVE
-    assert row.tags == [status_enum.ACTIVE, status_enum.INACTIVE]
-    assert all(isinstance(tag, status_enum) for tag in row.tags)
+    row = await query_single_row(mod, multi_sql, 1)
+    fields = cast("dict[str, object]", vars(row))
+    assert fields["status"] is active
+    tags_value = fields["tags"]
+    assert isinstance(tags_value, list)
+    tags_list = cast("list[object]", tags_value)
+    assert tags_list == [active, inactive]
+    assert all(isinstance(tag, status_enum) for tag in tags_list)
 
-    assert await mod.testdb_sql(scalar_sql).query_single_row(1) is status_enum.ACTIVE
+    assert await query_single_row(mod, scalar_sql, 1) is active
 
-    tags = await mod.testdb_sql(array_sql).query_single_row(1)
-    assert tags == [status_enum.ACTIVE, status_enum.INACTIVE]
-    assert all(isinstance(tag, status_enum) for tag in tags)
+    tags = await query_single_row(mod, array_sql, 1)
+    assert isinstance(tags, list)
+    tag_list = cast("list[object]", tags)
+    assert tag_list == [active, inactive]
+    assert all(isinstance(tag, status_enum) for tag in tag_list)
 
 
 async def test_nullable_enum_resolves_or_returns_none(
@@ -188,22 +266,24 @@ async def test_nullable_enum_resolves_or_returns_none(
     test_project.add_query("get_tags", array_sql)
 
     mod = test_project.generate()
-    status_enum = mod.TestdbUserStatus
+    status_enum = generated_enum(mod, "TestdbUserStatus")
+    active = status_enum["ACTIVE"]
+    inactive = status_enum["INACTIVE"]
 
-    async with mod.testdb_connection() as conn:
+    async with generated_connection(mod) as conn:
         await conn.execute(
             "INSERT INTO nullable_enum (id, status, tags) VALUES (%s, %s, %s)",
             (1, None, None),
         )
         await conn.execute(
             "INSERT INTO nullable_enum (id, status, tags) VALUES (%s, %s, %s)",
-            (2, status_enum.ACTIVE, [status_enum.INACTIVE]),
+            (2, active, [inactive]),
         )
 
-    assert await mod.testdb_sql(scalar_sql).query_single_row(1) is None
-    assert await mod.testdb_sql(scalar_sql).query_single_row(2) is status_enum.ACTIVE
-    assert await mod.testdb_sql(array_sql).query_single_row(1) is None
-    assert await mod.testdb_sql(array_sql).query_single_row(2) == [status_enum.INACTIVE]
+    assert await query_single_row(mod, scalar_sql, 1) is None
+    assert await query_single_row(mod, scalar_sql, 2) is active
+    assert await query_single_row(mod, array_sql, 1) is None
+    assert await query_single_row(mod, array_sql, 2) == [inactive]
 
 
 async def test_normalized_enum_label_roundtrips(test_project: ProjectBuilder) -> None:
@@ -219,22 +299,21 @@ async def test_normalized_enum_label_roundtrips(test_project: ProjectBuilder) ->
     test_project.add_query("get_phase", select_sql)
 
     mod = test_project.generate()
-    phase_enum = mod.TestdbTaskPhase
+    phase_enum = generated_enum(mod, "TestdbTaskPhase")
+    in_progress = phase_enum["IN_PROGRESS"]
 
     # Member names are normalized, but values keep the raw PostgreSQL labels —
     # so registration must map by value, not by member name.
-    assert phase_enum.IN_PROGRESS == "in-progress"
-    assert phase_enum.NUM2FA == "2fa"
+    assert in_progress == "in-progress"
+    assert phase_enum["NUM2FA"] == "2fa"
 
-    async with mod.testdb_connection() as conn:
+    async with generated_connection(mod) as conn:
         await conn.execute(
             "INSERT INTO phase_table (id, phase) VALUES (%s, %s)",
-            (1, phase_enum.IN_PROGRESS),
+            (1, in_progress),
         )
 
-    assert (
-        await mod.testdb_sql(select_sql).query_single_row(1) is phase_enum.IN_PROGRESS
-    )
+    assert await query_single_row(mod, select_sql, 1) is in_progress
 
 
 async def test_empty_enum_array_returns_empty_list(
@@ -252,12 +331,12 @@ async def test_empty_enum_array_returns_empty_list(
 
     mod = test_project.generate()
 
-    async with mod.testdb_connection() as conn:
+    async with generated_connection(mod) as conn:
         await conn.execute(
             "INSERT INTO empty_enum_array (id, tags) VALUES (1, '{}'::user_status[])"
         )
 
-    assert await mod.testdb_sql(select_sql).query_single_row(1) == []
+    assert await query_single_row(mod, select_sql, 1) == []
 
 
 async def test_distinct_enums_register_independently(
@@ -276,18 +355,21 @@ async def test_distinct_enums_register_independently(
     test_project.add_query("get_multi", select_sql)
 
     mod = test_project.generate()
-    status_enum = mod.TestdbUserStatus
-    color_enum = mod.TestdbColor
+    status_enum = generated_enum(mod, "TestdbUserStatus")
+    color_enum = generated_enum(mod, "TestdbColor")
+    active = status_enum["ACTIVE"]
+    red = color_enum["RED"]
 
-    async with mod.testdb_connection() as conn:
+    async with generated_connection(mod) as conn:
         await conn.execute(
             "INSERT INTO multi_enum (id, status, color) VALUES (%s, %s, %s)",
-            (1, status_enum.ACTIVE, color_enum.RED),
+            (1, active, red),
         )
 
-    row = await mod.testdb_sql(select_sql).query_single_row(1)
-    assert row.status is status_enum.ACTIVE
-    assert row.color is color_enum.RED
+    row = await query_single_row(mod, select_sql, 1)
+    fields = cast("dict[str, object]", vars(row))
+    assert fields["status"] is active
+    assert fields["color"] is red
 
 
 async def test_scalar_enum_query_requires_registered_connection(
@@ -302,9 +384,15 @@ async def test_scalar_enum_query_requires_registered_connection(
     unregistered_pool = ConnectionPool(test_project.dsn)
     try:
         async with unregistered_pool.connection() as conn:
-            query = mod.testdb_sql(select_sql).with_connection(conn)
+            query = sql_query(mod, select_sql)
+            with_connection_name = "with_connection"
+            with_connection = cast(
+                "Callable[[psycopg.AsyncConnection[object]], object]",
+                getattr(query, with_connection_name),
+            )
+            bound_query = with_connection(conn)
             with pytest.raises(TypeError, match="Expected scalar of type"):
-                await query.query_single_row()
+                await query_single_row_for(bound_query)
     finally:
         await unregistered_pool.close()
 
@@ -329,13 +417,13 @@ async def test_nullable_union_scalar_returns_none(
     ).read_text()
     assert "runtime.typed_value_row(not_null=False)" in generated
 
-    async with mod.testdb_connection() as conn:
+    async with generated_connection(mod) as conn:
         await conn.execute(
             "INSERT INTO network (id, addr) VALUES (1, NULL), (2, '10.0.0.1')"
         )
 
-    assert await mod.testdb_sql(select_sql).query_single_row(1) is None
-    assert await mod.testdb_sql(select_sql).query_single_row(2) == ipaddress.ip_address(
+    assert await query_single_row(mod, select_sql, 1) is None
+    assert await query_single_row(mod, select_sql, 2) == ipaddress.ip_address(
         "10.0.0.1"
     )
 
@@ -380,10 +468,10 @@ async def test_enum_value_name_normalization(test_project: ProjectBuilder) -> No
 
     mod = test_project.generate()
 
-    enum_cls = mod.TestdbWeirdEnum
-    assert enum_cls.NUM1ST == "1st"
-    assert enum_cls.FOO_BAR == "foo-bar"
-    assert enum_cls.FOO_BAR_2 == "foo_bar"
+    enum_cls = generated_enum(mod, "TestdbWeirdEnum")
+    assert enum_cls["NUM1ST"] == "1st"
+    assert enum_cls["FOO_BAR"] == "foo-bar"
+    assert enum_cls["FOO_BAR_2"] == "foo_bar"
 
     assert len(enum_cls.__members__) == 3
 
@@ -401,7 +489,7 @@ async def test_enum_empty_label_value(test_project: ProjectBuilder) -> None:
 
     mod = test_project.generate()
 
-    enum_cls = mod.TestdbEmptyLabelEnum
+    enum_cls = generated_enum(mod, "TestdbEmptyLabelEnum")
     assert {member.value for member in enum_cls} == {"", "present"}
     assert len(enum_cls.__members__) == 2
 
@@ -425,21 +513,24 @@ async def test_cross_schema_enum_type_annotation(
 
     mod = test_project.generate()
 
-    enum_cls = mod.TestdbMood
-    entity_cls = mod.TestdbCrossSchemaEnumTable
+    enum_cls = generated_enum(mod, "TestdbMood")
+    entity_cls = generated_class(mod, "TestdbCrossSchemaEnumTable")
+    annotations = cast("dict[str, object]", inspect.get_annotations(entity_cls))
+    happy = enum_cls["HAPPY"]
 
-    assert entity_cls.__annotations__["mood"] is enum_cls
+    assert annotations["mood"] is enum_cls
 
     # The enum lives in a non-public schema, so its type is registered by its
     # schema-qualified name.
-    async with mod.testdb_connection() as conn:
+    async with generated_connection(mod) as conn:
         await conn.execute(
             "INSERT INTO cross_schema_enum_table (mood) VALUES (%s)",
-            (enum_cls.HAPPY,),
+            (happy,),
         )
 
-    row = await mod.testdb_sql(select_sql).query_single_row()
-    assert row.mood is enum_cls.HAPPY
+    row = await query_single_row(mod, select_sql)
+    fields = cast("dict[str, object]", vars(row))
+    assert fields["mood"] is happy
 
 
 async def test_pg_catalog_type_does_not_break_generation(
@@ -450,7 +541,7 @@ async def test_pg_catalog_type_does_not_break_generation(
 
     mod = test_project.generate()
 
-    row = await mod.testdb_sql(sql).query_single_row()
+    row = await query_single_row(mod, sql)
     assert row == 1
 
 
@@ -494,8 +585,9 @@ async def test_unknown_sql_type_warns_and_maps_to_object(
     assert unknown_type_warnings
     assert "unknown_composite" in str(unknown_type_warnings[0].message)
 
-    entity_cls = mod.TestdbUnknownTable
-    assert entity_cls.__annotations__["val"] is object
+    entity_cls = generated_class(mod, "TestdbUnknownTable")
+    annotations = cast("dict[str, object]", inspect.get_annotations(entity_cls))
+    assert annotations["val"] is object
 
 
 async def test_unknown_sql_type_can_be_promoted_to_error(
@@ -554,14 +646,14 @@ async def test_standard_type_mapping_network(test_project: ProjectBuilder) -> No
         ipaddress.IPv4Interface,
         ipaddress.IPv6Interface,
     }
-    inet_query = mod.testdb_sql(inet_stmt)
+    inet_query = sql_query(mod, inet_stmt)
     assert_return_types(inet_query, inet_types)
-    assert isinstance(await inet_query.query_single_row(), tuple(inet_types))
+    assert isinstance(await query_single_row_for(inet_query), tuple(inet_types))
 
     cidr_types = {ipaddress.IPv4Network, ipaddress.IPv6Network}
-    cidr_query = mod.testdb_sql(cidr_stmt)
+    cidr_query = sql_query(mod, cidr_stmt)
     assert_return_types(cidr_query, cidr_types)
-    assert isinstance(await cidr_query.query_single_row(), tuple(cidr_types))
+    assert isinstance(await query_single_row_for(cidr_query), tuple(cidr_types))
 
 
 async def test_standard_type_mapping_interval(test_project: ProjectBuilder) -> None:
@@ -571,9 +663,9 @@ async def test_standard_type_mapping_interval(test_project: ProjectBuilder) -> N
 
     mod = test_project.generate()
 
-    interval_query = mod.testdb_sql(interval_stmt)
+    interval_query = sql_query(mod, interval_stmt)
     assert_return_types(interval_query, {datetime.timedelta})
-    assert isinstance(await interval_query.query_single_row(), datetime.timedelta)
+    assert isinstance(await query_single_row_for(interval_query), datetime.timedelta)
 
 
 async def test_standard_type_mapping_text_variants(
@@ -590,9 +682,9 @@ async def test_standard_type_mapping_text_variants(
     mod = test_project.generate()
 
     for stmt in (bpchar_stmt, char_stmt, name_stmt):
-        q = mod.testdb_sql(stmt)
+        q = sql_query(mod, stmt)
         assert_return_types(q, {str})
-        assert isinstance(await q.query_single_row(), str)
+        assert isinstance(await query_single_row_for(q), str)
 
 
 async def test_type_overrides_suppress_unknown_warning_and_override_annotation(
@@ -616,10 +708,10 @@ async def test_type_overrides_suppress_unknown_warning_and_override_annotation(
     ]
     assert not unknown_type_warnings
 
-    q = mod.testdb_sql(stmt)
+    q = sql_query(mod, stmt)
     assert_return_types(q, {int})
 
-    val = await q.query_single_row()
+    val = await query_single_row_for(q)
     assert val == 1
     assert isinstance(val, int)
 
@@ -712,13 +804,15 @@ async def test_analyzer_type_names_map_like_static_ones(
 
     for col, _, py_type in _ANALYZER_VOCABULARY_CASES:
         for axis, statements in (("static", static), ("derived", derived)):
-            returned = query_signature(
-                mod.testdb_sql(statements[col])
-            ).return_annotation
+            returned = cast(
+                "object",
+                query_signature(sql_query(mod, statements[col])).return_annotation,
+            )
             assert annotation_types(returned) == {py_type}, (col, axis)
 
-        param = query_signature(mod.testdb_sql(parametrized[col])).parameters["p"]
-        assert annotation_types(param.annotation) == {py_type}, (col, "param")
+        param = query_signature(sql_query(mod, parametrized[col])).parameters["p"]
+        annotation = cast("object", param.annotation)
+        assert annotation_types(annotation) == {py_type}, (col, "param")
 
 
 def test_type_overrides_ignored_when_no_queries(
@@ -727,7 +821,7 @@ def test_type_overrides_ignored_when_no_queries(
     mod = test_project.generate(type_overrides={"jsonb": "str"})
 
     with pytest.raises(KeyError, match="Unknown statement"):
-        mod.testdb_sql("SELECT * FROM users")
+        sql_query(mod, "SELECT * FROM users")
 
 
 _SHADOWING_ENUM_NAMES: list[LiteralString] = [
@@ -769,13 +863,14 @@ async def test_enum_named_after_builtin_type_wins(
         if issubclass(w.category, UnknownSQLTypeWarning)
     ]
 
-    enum_cls = getattr(mod, f"Testdb{type_name.capitalize()}")
-    assert_return_types(mod.testdb_sql(stmt), {enum_cls})
+    enum_cls = generated_enum(mod, f"Testdb{type_name.capitalize()}")
+    first = enum_cls["FIRST"]
+    assert_return_types(sql_query(mod, stmt), {enum_cls})
 
-    async with mod.testdb_connection() as conn:
+    async with generated_connection(mod) as conn:
         await conn.execute(f"INSERT INTO {table} (id, v) VALUES (1, 'first')")
 
-    assert await mod.testdb_sql(stmt).query_single_row() is enum_cls.FIRST
+    assert await query_single_row(mod, stmt) is first
 
 
 async def test_type_overrides_apply_to_analyzer_type_name(
@@ -792,7 +887,7 @@ async def test_type_overrides_apply_to_analyzer_type_name(
 
     mod = test_project.generate(type_overrides={"float8": "decimal.Decimal"})
 
-    assert_return_types(mod.testdb_sql(stmt), {decimal.Decimal})
+    assert_return_types(sql_query(mod, stmt), {decimal.Decimal})
 
 
 async def test_quoted_enum_name_resolves_in_parameter_position(
@@ -819,15 +914,17 @@ async def test_quoted_enum_name_resolves_in_parameter_position(
         if issubclass(w.category, UnknownSQLTypeWarning)
     ]
 
-    enum_cls = mod.TestdbCamelCaseEnum
+    enum_cls = generated_enum(mod, "TestdbCamelCaseEnum")
+    first = enum_cls["FIRST"]
 
-    param = query_signature(mod.testdb_sql(stmt)).parameters["p"]
-    assert annotation_types(param.annotation) == {enum_cls}
+    param = query_signature(sql_query(mod, stmt)).parameters["p"]
+    annotation = cast("object", param.annotation)
+    assert annotation_types(annotation) == {enum_cls}
 
-    async with mod.testdb_connection() as conn:
+    async with generated_connection(mod) as conn:
         await conn.execute("INSERT INTO camel (id, v) VALUES (1, 'first')")
 
-    assert await mod.testdb_sql(stmt).query_single_row(p=enum_cls.FIRST) == 1
+    assert await query_single_row(mod, stmt, p=first) == 1
 
 
 async def test_type_overrides_apply_to_qualified_domain(
@@ -846,12 +943,12 @@ async def test_type_overrides_apply_to_qualified_domain(
 
     mod = test_project.generate(type_overrides={"integer": "str"})
 
-    assert_return_types(mod.testdb_sql(stmt), {str})
+    assert_return_types(sql_query(mod, stmt), {str})
 
-    async with mod.testdb_connection() as conn:
+    async with generated_connection(mod) as conn:
         await conn.execute("INSERT INTO labels (id, v) VALUES (1, 'label')")
 
-    assert await mod.testdb_sql(stmt).query_single_row() == "label"
+    assert await query_single_row(mod, stmt) == "label"
 
 
 async def test_type_overrides_reject_unused_type_name(

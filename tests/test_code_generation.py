@@ -18,7 +18,6 @@ _USER_METADATA_TYPE = "tests.json_models.UserMetadata"
 _USER_METADATA_REF = JSONModelRef(
     module_path="tests",
     class_path="json_models.UserMetadata",
-    alias="tests",
     origin="test JSON model",
 )
 _JSON_METADATA_EXPR = f"runtime.dump_json_value({_USER_METADATA_TYPE}, metadata)"
@@ -46,8 +45,10 @@ q3 = testdb_sql("SELECT id FROM users")
     ).read_text()
 
     location_lines = [
-        [int(x) for x in re.findall(r":(\d+)", locations)]
-        for locations in re.findall(r"_locations = (.+)", generated)
+        [int(match.group(1)) for match in re.finditer(r":(\d+)", locations)]
+        for locations in (
+            match.group(1) for match in re.finditer(r"_locations = (.+)", generated)
+        )
     ]
     assert location_lines == [[4, 6], [5]]
 
@@ -279,8 +280,8 @@ async def test_special_types_params(test_project: ProjectBuilder) -> None:
     )
     test_project.add_query(
         "insert_special",
-        "INSERT INTO special_types (id, d, t, ts, b, j) "
-        "VALUES ($1, $2, $3, $4, $5, $6)",
+        """INSERT INTO special_types (id, d, t, ts, b, j)
+VALUES ($1, $2, $3, $4, $5, $6)""",
     )
     changed, _ = test_project.generate_checked()
     assert changed is True

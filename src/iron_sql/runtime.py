@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import functools
+import inspect
 import itertools
 import logging
 import time
@@ -25,6 +26,7 @@ from typing import Literal
 from typing import Self
 from typing import TypedDict
 from typing import TypeGuard
+from typing import cast
 from typing import overload
 
 import psycopg
@@ -38,10 +40,17 @@ from pydantic import TypeAdapter
 
 logger = logging.getLogger(__name__)
 
+type ConnectionFactory = Callable[
+    [], contextlib.AbstractAsyncContextManager[psycopg.AsyncConnection[Any]]
+]
+type AsyncPoolFactory = Callable[
+    ..., psycopg_pool.AsyncConnectionPool[psycopg.AsyncConnection[Any]]
+]
+
 
 @functools.cache
-def get_adapter(typ: object) -> TypeAdapter[Any]:
-    return TypeAdapter(typ)
+def get_adapter(typ: object) -> TypeAdapter[object]:
+    return cast("TypeAdapter[object]", TypeAdapter(typ))
 
 
 class NoRowsError(Exception):
@@ -113,7 +122,8 @@ async def _has_active_listen_subscriptions(conn: psycopg.AsyncConnection[Any]) -
     if row is None:
         msg = "Expected a single boolean row from active LISTEN check"
         raise RuntimeError(msg)
-    return bool(row[0])
+    value = cast("object", row[0])
+    return bool(value)
 
 
 def _validate_channel(name: str) -> None:
@@ -248,6 +258,16 @@ class Query[T]:
     _connection_factory: Callable[
         [], contextlib.AbstractAsyncContextManager[psycopg.AsyncConnection[Any]]
     ]
+
+    def __init__(self) -> None:
+        self._row_factory = cast(
+            "psycopg.rows.BaseRowFactory[T]",
+            inspect.getattr_static(type(self), "_row_factory"),
+        )
+        self._connection_factory = cast(
+            "ConnectionFactory",
+            inspect.getattr_static(type(self), "_connection_factory"),
+        )
 
     def with_connection(self, connection: psycopg.AsyncConnection[Any]) -> Self:
         q = self.__class__()
@@ -393,13 +413,18 @@ class ConnectionPool:
         }
         if self.application_name is not None:
             conn_kwargs["application_name"] = self.application_name
-        self.psycopg_pool = psycopg_pool.AsyncConnectionPool(
+        pool_factory = cast(
+            "AsyncPoolFactory",
+            psycopg_pool.AsyncConnectionPool,
+        )
+        pool = pool_factory(
             self.conninfo,
             **forwarded,
             open=False,
             name=self.name,
             kwargs=conn_kwargs,
         )
+        self.psycopg_pool = pool
 
     @asynccontextmanager
     async def connection_in_context(
@@ -420,22 +445,27 @@ class ConnectionPool:
 def validate_json_field[T](typ: type[T], value: object) -> T:
     adapter = get_adapter(typ)
     if isinstance(value, str | bytes):
-        return adapter.validate_json(value)
-    return adapter.validate_python(value)
+        validated = adapter.validate_json(value)
+    else:
+        validated = adapter.validate_python(value)
+    return cast("T", validated)
 
 
 def json_validated[T](**json_fields: object) -> Callable[[type[T]], type[T]]:
     def decorator(cls: type[T]) -> type[T]:
-        original_post_init = getattr(cls, "__post_init__", None)
+        original_post_init = cast(
+            "Callable[[object], None] | None", getattr(cls, "__post_init__", None)
+        )
 
         def __post_init__(self: object) -> None:  # noqa: N807
             if original_post_init is not None:
                 original_post_init(self)
             for name, typ in json_fields.items():
-                current = getattr(self, name)
+                current = cast("object", getattr(self, name))
                 if current is None:
                     continue
-                setattr(self, name, validate_json_field(typ, current))  # pyright: ignore[reportArgumentType]
+                field_type = cast("type[object]", typ)
+                setattr(self, name, validate_json_field(field_type, current))
 
         setattr(cls, "__post_init__", __post_init__)  # noqa: B010
         return cls
@@ -445,7 +475,7 @@ def json_validated[T](**json_fields: object) -> Callable[[type[T]], type[T]]:
 
 def dump_json_value(typ: object, value: object) -> object:
     adapter = get_adapter(typ)
-    return adapter.dump_python(value, mode="json")
+    return cast("object", adapter.dump_python(value, mode="json"))
 
 
 def dump_json_text(typ: object, value: object) -> str:
@@ -493,9 +523,11 @@ def typed_scalar_row[T](
     def typed_scalar_row_(
         cursor: BaseCursor[Any, Any],
     ) -> psycopg.rows.RowMaker[T | None]:
-        scalar_row_ = psycopg.rows.scalar_row(cursor)
+        scalar_row_ = cast(
+            "psycopg.rows.RowMaker[object]", psycopg.rows.scalar_row(cursor)
+        )
 
-        def typed_scalar_row__(values: Sequence[Any]) -> T | None:
+        def typed_scalar_row__(values: Sequence[object]) -> T | None:
             val = scalar_row_(values)
             if val is None:
                 if not_null:
@@ -554,16 +586,18 @@ def typed_value_row[T](*, not_null: bool) -> psycopg.rows.BaseRowFactory[T | Non
     def typed_value_row_(
         cursor: BaseCursor[Any, Any],
     ) -> psycopg.rows.RowMaker[T | None]:
-        scalar_row_ = psycopg.rows.scalar_row(cursor)
+        scalar_row_ = cast(
+            "psycopg.rows.RowMaker[object]", psycopg.rows.scalar_row(cursor)
+        )
 
-        def typed_value_row__(values: Sequence[Any]) -> T | None:
+        def typed_value_row__(values: Sequence[object]) -> T | None:
             val = scalar_row_(values)
             if val is None:
                 if not_null:
                     msg = "Expected non-null value, got None"
                     raise TypeError(msg)
                 return None
-            return val
+            return cast("T", val)
 
         return typed_value_row__
 
@@ -592,9 +626,11 @@ def typed_array_row[T](
     def typed_array_row_(
         cursor: BaseCursor[Any, Any],
     ) -> psycopg.rows.RowMaker[list[T] | None]:
-        scalar_row_ = psycopg.rows.scalar_row(cursor)
+        scalar_row_ = cast(
+            "psycopg.rows.RowMaker[object]", psycopg.rows.scalar_row(cursor)
+        )
 
-        def typed_array_row__(values: Sequence[Any]) -> list[T] | None:
+        def typed_array_row__(values: Sequence[object]) -> list[T] | None:
             val = scalar_row_(values)
             if val is None:
                 if not_null:

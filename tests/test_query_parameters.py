@@ -1,15 +1,42 @@
 import inspect
 import uuid
+from collections.abc import AsyncGenerator
 
-from tests.conftest import ProjectBuilder
+import pytest
+
+from tests.conftest import SCHEMA_SQL
+from tests.conftest import GeneratedTestDB
+from tests.conftest import generated_package
+
+generated_package(
+    "query_parameters",
+    schema=SCHEMA_SQL,
+    queries='''
+        from tests.generated.query_parameters.testdb import testdb_sql
+
+        testdb_sql("""INSERT INTO users (id, username, is_active)
+        VALUES (@id, @username, @active)""")
+        testdb_sql("SELECT id FROM users WHERE id = $1 AND username = @username")
+        testdb_sql("SELECT count(*) FROM users WHERE username = @u?")
+        testdb_sql("SELECT count(*) FROM users WHERE id = $1 OR id = $2")
+    ''',
+)
+
+from tests.generated.query_parameters import testdb
 
 
-async def test_parameters_named(test_project: ProjectBuilder) -> None:
-    insert_sql = (
-        "INSERT INTO users (id, username, is_active) VALUES (@id, @username, @active)"
-    )
-    test_project.add_query("insert_user", insert_sql)
-    mod = test_project.generate()
+@pytest.fixture(autouse=True)
+async def use_generated_database(
+    generated_test_db: GeneratedTestDB,
+) -> AsyncGenerator[None]:
+    async with generated_test_db("query_parameters"):
+        yield
+
+
+async def test_parameters_named() -> None:
+    insert_sql = """INSERT INTO users (id, username, is_active)
+VALUES (@id, @username, @active)"""
+    mod = testdb
 
     uid = uuid.uuid4()
     await mod.testdb_sql(insert_sql).execute(id=uid, username="e1_user", active=True)
@@ -19,10 +46,9 @@ async def test_parameters_named(test_project: ProjectBuilder) -> None:
     assert params[1].kind == inspect.Parameter.KEYWORD_ONLY
 
 
-async def test_parameters_mixed(test_project: ProjectBuilder) -> None:
+async def test_parameters_mixed() -> None:
     select_mixed_sql = "SELECT id FROM users WHERE id = $1 AND username = @username"
-    test_project.add_query("select_mixed", select_mixed_sql)
-    mod = test_project.generate()
+    mod = testdb
 
     uid = uuid.uuid4()
     async with mod.testdb_connection() as conn:
@@ -44,10 +70,9 @@ async def test_parameters_mixed(test_project: ProjectBuilder) -> None:
     assert params_mixed[2].kind == inspect.Parameter.KEYWORD_ONLY
 
 
-async def test_parameters_optional(test_project: ProjectBuilder) -> None:
+async def test_parameters_optional() -> None:
     select_opt_sql = "SELECT count(*) FROM users WHERE username = @u?"
-    test_project.add_query("select_opt", select_opt_sql)
-    mod = test_project.generate()
+    mod = testdb
 
     uid = uuid.uuid4()
     async with mod.testdb_connection() as conn:
@@ -62,10 +87,9 @@ async def test_parameters_optional(test_project: ProjectBuilder) -> None:
     assert c2 == 1
 
 
-async def test_parameters_dedup(test_project: ProjectBuilder) -> None:
+async def test_parameters_dedup() -> None:
     select_dedup_sql = "SELECT count(*) FROM users WHERE id = $1 OR id = $2"
-    test_project.add_query("select_dedup", select_dedup_sql)
-    mod = test_project.generate()
+    mod = testdb
 
     uid = uuid.uuid4()
     async with mod.testdb_connection() as conn:

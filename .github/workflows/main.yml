@@ -23,6 +23,13 @@ jobs:
         run: |
           just generate-example
           git diff --exit-code example/
+      - name: Check generated test packages are committed
+        run: |
+          test -z "$(git status --porcelain tests/generated/)" || {
+            git status --porcelain tests/generated/
+            echo "tests/generated/ is stale: run 'just test' and commit the result"
+            exit 1
+          }
   publish:
     if: startsWith(github.event.ref, 'refs/tags/v')
     needs: test
