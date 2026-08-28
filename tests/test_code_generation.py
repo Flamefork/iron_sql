@@ -1,5 +1,4 @@
 import importlib.resources
-import logging
 import re
 import sys
 from ast import parse
@@ -7,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from iron_sql.codegen import SQLGenerationError
 from iron_sql.codegen import generate_sql_module
 from iron_sql.codegen.generator import JSONModelRef
 from iron_sql.codegen.generator import ModuleExprRef
@@ -139,13 +139,14 @@ q2 = testdb_sql("SELECT id, username FROM users", row_type="UserMini")
     assert changed is True
 
 
-def test_sqlc_failure_returns_false(test_project: ProjectBuilder) -> None:
+def test_sqlc_failure_raises(test_project: ProjectBuilder) -> None:
     test_project.add_query("bad_query", "SELEC FROM users")
-    assert test_project.generate_no_import() is False
+    with pytest.raises(SQLGenerationError, match="Error running SQLC"):
+        test_project.generate_no_import()
 
 
 def test_sqlc_error_maps_to_source_location(
-    test_project: ProjectBuilder, caplog: pytest.LogCaptureFixture
+    test_project: ProjectBuilder,
 ) -> None:
     test_project.set_queries_source(
         """\
@@ -157,13 +158,13 @@ q2 = testdb_sql("SELECT nonexistent_column FROM users")
 q3 = testdb_sql("SELECT nonexistent_column FROM users")
 """
     )
-    with caplog.at_level(logging.ERROR, logger="iron_sql.codegen.generator"):
-        result = test_project.generate_no_import()
+    with pytest.raises(SQLGenerationError) as exc_info:
+        test_project.generate_no_import()
 
-    assert result is False
-    assert "queries.sql" not in caplog.text
-    assert "queries.py:5" in caplog.text
-    assert "queries.py:6" in caplog.text
+    message = str(exc_info.value)
+    assert "queries.sql" not in message
+    assert "queries.py:5" in message
+    assert "queries.py:6" in message
 
 
 def test_result_shapes_validation_error_zero_cols(test_project: ProjectBuilder) -> None:

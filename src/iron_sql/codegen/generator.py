@@ -130,6 +130,10 @@ class UnknownSQLTypeWarning(UserWarning):
     pass
 
 
+class SQLGenerationError(ValueError):
+    pass
+
+
 @dataclass(kw_only=True, frozen=True)
 class ModuleExprRef:
     module_name: str
@@ -473,8 +477,8 @@ def generate_sql_module(  # noqa: PLR0913, PLR0914
 
     if sqlc_res.error:
         mapped = map_sqlc_error(sqlc_res.error, block_starts, query_locations_by_name)
-        logger.error(f"Error running SQLC:\n{mapped}")
-        return False
+        msg = f"Error running SQLC:\n{mapped}"
+        raise SQLGenerationError(msg)
 
     normalized_type_overrides = {
         db_type: normalize_type_override_expression(expression)
