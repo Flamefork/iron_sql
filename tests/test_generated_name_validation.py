@@ -754,7 +754,6 @@ def test_query_method_external_read_claims_match_symtable(
         result,
         columns,
         ["queries.py:4"],
-        function_scopes=scopes,
     )
     module_table = symtable.symtable(source, Path("generated.py").as_posix(), "exec")
     (class_table,) = module_table.get_children()

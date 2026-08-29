@@ -970,7 +970,7 @@ async def test_type_overrides_reject_unused_type_name(
     assert "float8" in str(excinfo.value)
 
 
-@pytest.mark.parametrize("expression", ["bad-name", "missing.Type"])
+@pytest.mark.parametrize("expression", ["bad-name", "missing.Type", "list["])
 def test_type_overrides_reject_invalid_python_expression(
     test_project: ProjectBuilder,
     expression: str,

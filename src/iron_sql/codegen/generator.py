@@ -197,16 +197,6 @@ class ModuleExprRef:
             source_spellings=source_spellings,
         )
 
-    @property
-    def import_name(self) -> str:
-        if not self.import_names:
-            msg = (
-                f"module expression {self.module_expr!r} does not read a binding "
-                f"from {self.module_name!r}"
-            )
-            raise ValueError(msg)
-        return self.import_names[0]
-
     def evaluate[T](self, *, expected_type: type[T]) -> T:
         mod = importlib.import_module(self.module_name)
         value = cast("object", eval(self.module_expr, vars(mod)))  # noqa: S307
@@ -422,11 +412,15 @@ def map_sqlc_error(
     def replace(m: re.Match[str]) -> str:
         line = int(m.group(1))
         name = next((n for start, n in reversed(block_starts) if start <= line), None)
+        missing_block_msg = (
+            f"SQLC error line {line} precedes every generated query block"
+        )
         if name is None:
-            return m.group(0)
-        locations = query_locations_by_name.get(name)
+            raise AssertionError(missing_block_msg)
+        locations = query_locations_by_name[name]
+        missing_locations_msg = f"SQLC query {name!r} has no source locations"
         if not locations:
-            return m.group(0)
+            raise AssertionError(missing_locations_msg)
         return f"{', '.join(locations)}:"
 
     return re.sub(r"queries\.sql:(\d+)(?::\d+)?:", replace, error)
@@ -613,10 +607,7 @@ def generate_sql_module(  # noqa: PLR0913, PLR0914
         query_dict_entries,
         application_name,
     )
-    validate_rendered_module(
-        new_content,
-        target_module_path,
-    )
+    compile(new_content, target_module_path.as_posix(), "exec")
     changed = write_if_changed(target_module_path, new_content + "\n")
     if changed:
         logger.info(f"Generated SQL module {module_full_name}")
@@ -1512,17 +1503,6 @@ def validate_generated_names(module: GeneratedModuleSpec) -> None:
     raise_generated_name_issues(issues)
 
 
-def validate_rendered_module(
-    source: str,
-    path: Path,
-) -> None:
-    try:
-        compile(source, path.as_posix(), "exec")
-    except SyntaxError as exc:
-        msg = f"Generated Python failed compiler preflight: {exc}"
-        raise RuntimeError(msg) from exc
-
-
 def walk_symbol_tables(
     table: symtable.SymbolTable,
 ) -> Iterator[symtable.SymbolTable]:
@@ -1555,9 +1535,11 @@ def module_expression_binding_spellings(
                 yield from walk(body, nested_function=True)
             case ast.NamedExpr(target=ast.Name()) if not nested_function:
                 spelling = ast.get_source_segment(source, node.target)
+                missing_spelling_msg = (
+                    f"Cannot recover module expression binding from {source!r}"
+                )
                 if spelling is None:
-                    msg = f"Cannot recover module expression binding from {source!r}"
-                    raise RuntimeError(msg)
+                    raise AssertionError(missing_spelling_msg)
                 yield spelling
                 yield from walk(node.value, nested_function=nested_function)
             case _:
@@ -1578,9 +1560,9 @@ def expression_name_spellings(
         if node.id not in names:
             continue
         spelling = ast.get_source_segment(source, node)
+        missing_spelling_msg = f"Cannot recover module expression name from {source!r}"
         if spelling is None:
-            msg = f"Cannot recover module expression name from {source!r}"
-            raise RuntimeError(msg)
+            raise AssertionError(missing_spelling_msg)
         yield spelling
 
 
@@ -1792,8 +1774,6 @@ def render_query_class(
     result: str,
     result_columns: tuple[ColumnSpec, ...],
     locations: list[str],
-    *,
-    function_scopes: tuple[FunctionScopeSpec, ...] | None = None,
 ) -> str:
     spec = build_query_class_render_spec(
         query_name,
@@ -1802,7 +1782,6 @@ def render_query_class(
         result,
         result_columns,
         tuple(locations),
-        function_scopes=function_scopes,
     )
     return render_query_class_spec(spec)
 
@@ -1814,22 +1793,22 @@ def build_query_class_render_spec(
     result: str,
     result_columns: tuple[ColumnSpec, ...],
     locations: tuple[str, ...],
-    *,
-    function_scopes: tuple[FunctionScopeSpec, ...] | None = None,
 ) -> QueryClassRenderSpec:
-    if function_scopes is None:
-        function_scopes = query_method_scope_specs(
-            query_name,
-            query_params,
-            result_columns,
-            locations,
-        )
+    function_scopes = query_method_scope_specs(
+        query_name,
+        query_params,
+        result_columns,
+        locations,
+    )
     params_arg, query_fn_signature = render_query_parameters(query_params)
 
     row_factory = render_row_factory(result, result_columns)
     parameter_type_expressions = tuple(param.py_type for param in query_params)
 
     function_names = tuple(scope.function_name for scope in function_scopes)
+    unsupported_method_set_msg = (
+        f"Unsupported generated query method set: {function_names!r}"
+    )
     method_sources: tuple[str, ...]
     method_eager_expressions: tuple[tuple[str, ...], ...]
     if function_names == (
@@ -1898,8 +1877,7 @@ def build_query_class_render_spec(
         )
         method_eager_expressions = (parameter_type_expressions,)
     else:
-        msg = f"Unsupported generated query method set: {function_names!r}"
-        raise RuntimeError(msg)
+        raise AssertionError(unsupported_method_set_msg)
 
     fixed_sources = (
         (
@@ -2027,13 +2005,6 @@ def expression_root_names(source: str) -> Iterator[str]:
             previous_operator = ""
         elif token.type == tokenize.OP:
             previous_operator = token.string
-        elif token.type not in {
-            tokenize.ENCODING,
-            tokenize.ENDMARKER,
-            tokenize.NEWLINE,
-            tokenize.NL,
-        }:
-            previous_operator = ""
 
 
 def render_query_class_spec(spec: QueryClassRenderSpec) -> str:
@@ -2302,12 +2273,15 @@ def find_all_queries(
     for file, lineno, node in find_fn_calls(files, sql_fn_name):
         relative_path = file.relative_to(src_path)
 
+        if len(node.args) != 1:
+            msg = (
+                f"Invalid positional arguments for {sql_fn_name} "
+                f"at {relative_path}:{lineno}, "
+                "expected a single string literal"
+            )
+            raise TypeError(msg)
         sql_arg = node.args[0]
-        if (
-            len(node.args) != 1
-            or not isinstance(sql_arg, ast.Constant)
-            or not isinstance(sql_arg.value, str)
-        ):
+        if not isinstance(sql_arg, ast.Constant) or not isinstance(sql_arg.value, str):
             msg = (
                 f"Invalid positional arguments for {sql_fn_name} "
                 f"at {relative_path}:{lineno}, "
@@ -2318,7 +2292,21 @@ def find_all_queries(
         sql = sql_arg.value
 
         row_type = None
+        if len(node.keywords) > 1:
+            msg = (
+                f"Invalid keyword arguments for {sql_fn_name} "
+                f"at {relative_path}:{lineno}, "
+                "expected at most one row_type string literal"
+            )
+            raise TypeError(msg)
         for kw in node.keywords:
+            if kw.arg != "row_type":
+                argument_name = "**kwargs" if kw.arg is None else repr(kw.arg)
+                msg = (
+                    f"Invalid keyword argument {argument_name} for {sql_fn_name} "
+                    f"at {relative_path}:{lineno}, expected row_type"
+                )
+                raise TypeError(msg)
             if not isinstance(kw.value, ast.Constant) or not isinstance(
                 kw.value.value, str
             ):
@@ -2327,9 +2315,7 @@ def find_all_queries(
                     f"at {relative_path}:{lineno}, expected a string literal"
                 )
                 raise TypeError(msg)
-            if kw.arg == "row_type":
-                row_type = kw.value.value
-                break
+            row_type = kw.value.value
 
         yield CodeQuery(
             sql=sql,

@@ -118,11 +118,8 @@ async def execute_unlisten(conn: psycopg.AsyncConnection[Any], channel: str) -> 
 async def _has_active_listen_subscriptions(conn: psycopg.AsyncConnection[Any]) -> bool:
     async with conn.cursor() as cur:
         await cur.execute("SELECT EXISTS (SELECT FROM pg_listening_channels())")
-        row = await cur.fetchone()
-    if row is None:
-        msg = "Expected a single boolean row from active LISTEN check"
-        raise RuntimeError(msg)
-    value = cast("object", row[0])
+        row = cast("tuple[object]", await cur.fetchone())
+    value = row[0]
     return bool(value)
 
 
@@ -223,8 +220,9 @@ def _record_execution(
     if active is None:
         return
     task = asyncio.current_task()
+    missing_task_msg = "Query repeat detection requires a running asyncio task"
     if task is None:
-        return
+        raise AssertionError(missing_task_msg)
 
     task_executions = active.by_task.setdefault(task, _TaskExecutions())
     if query_cls in task_executions.reported:

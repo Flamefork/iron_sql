@@ -127,11 +127,11 @@ class Catalog(pydantic.BaseModel):
     schemas: tuple[Schema, ...]
 
     def schema_by_name(self, name: str) -> Schema:
+        missing_schema_msg = f"Schema not found: {name}"
         for schema in self.schemas:
             if schema.name == name:
                 return schema
-        msg = f"Schema not found: {name}"
-        raise ValueError(msg)
+        raise AssertionError(missing_schema_msg)
 
     def schema_by_ref(self, ref: CatalogReference) -> Schema:
         return self.schema_by_name(ref.schema_name or self.default_schema)

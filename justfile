@@ -8,11 +8,11 @@ lint:
     uv run basedpyright
 
 test +args="":
-    uv run pytest -vv --color=yes --showlocals --durations=10 '{{ args }}'
+    uv run pytest -vv --color=yes --showlocals --durations=10 --cov=iron_sql '{{ args }}'
 
 coverage:
     rm -rf .coverage/*
-    uv run pytest --cov --cov-report=html
+    uv run pytest --cov=iron_sql --cov-report=html
     open .coverage/htmlcov/index.html
 
 generate-example:

@@ -105,6 +105,47 @@ def test_scanner_rejects_wrong_call_shape(test_project: ProjectBuilder) -> None:
         test_project.generate_no_import()
 
 
+@pytest.mark.parametrize(
+    ("call", "message"),
+    [
+        ("testdb_sql()", "Invalid positional arguments"),
+        (
+            'testdb_sql("SELECT 1", unknown="value")',
+            "Invalid keyword argument 'unknown'",
+        ),
+        (
+            'testdb_sql("SELECT 1", row_type="First", row_type="Second")',
+            "Invalid keyword arguments",
+        ),
+        (
+            'testdb_sql("SELECT 1", row_type="First", unknown="value")',
+            "Invalid keyword arguments",
+        ),
+        (
+            'testdb_sql("SELECT 1", **{"row_type": "Result"})',
+            "Invalid keyword argument \\*\\*kwargs",
+        ),
+    ],
+)
+def test_scanner_rejects_unsupported_call_arguments(
+    test_project: ProjectBuilder,
+    call: str,
+    message: str,
+) -> None:
+    source = f"""\
+from typing import Any
+def testdb_sql(q: str, **kwargs: Any) -> Any: ...
+
+{call}
+"""
+    test_project.set_queries_source(source)
+
+    with pytest.raises(TypeError, match=message) as exc_info:
+        test_project.generate_no_import()
+
+    assert "queries.py:4" in str(exc_info.value)
+
+
 def test_scanner_rejects_same_stmt_different_row_type(
     test_project: ProjectBuilder,
 ) -> None:
@@ -305,7 +346,7 @@ def get_dsn() -> str:
 
     assert expr_ref.module_name == f"{test_project.app_pkg}.config"
     assert expr_ref.module_expr == "get_dsn()"
-    assert expr_ref.import_name == "get_dsn"
+    assert expr_ref.import_names == ("get_dsn",)
     assert expr_ref.evaluate(expected_type=str) == test_project.dsn
 
 
@@ -390,6 +431,79 @@ def select_dsn(value: str) -> str:
 
     assert f"from {test_project.app_pkg}.config import select_dsn" in generated
     assert f"from {test_project.app_pkg}.config import BASE_DSN" in generated
+
+
+def test_module_expression_imports_names_read_by_lambda_defaults(
+    test_project: ProjectBuilder,
+) -> None:
+    (test_project.app_dir / "config.py").write_text(
+        f'DSN = "{test_project.dsn}"\n',
+        encoding="utf-8",
+    )
+    test_project.add_query("q", "SELECT 1")
+    test_project.write_queries()
+    if str(test_project.src_path) not in sys.path:
+        sys.path.insert(0, str(test_project.src_path))
+
+    expression = "(lambda value=DSN, *, required: value)(required=None)"
+    generate_sql_module(
+        schema_path=Path("schema.sql"),
+        module_full_name=test_project.module_full_name,
+        dsn_expr=f"{test_project.app_pkg}.config:{expression}",
+        src_path=test_project.src_path,
+        tempdir_path=test_project.src_path,
+    )
+    test_project.import_generated()
+    generated = (
+        test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
+    ).read_text(encoding="utf-8")
+
+    assert f"from {test_project.app_pkg}.config import DSN" in generated
+    assert expression in generated
+
+
+@pytest.mark.parametrize(
+    ("dsn_expr", "message"),
+    [
+        ("config.DSN", "module expression must be 'module:expr'"),
+        ("config:DSN[", "invalid module expression"),
+    ],
+)
+def test_invalid_dsn_expression_fails_before_generation(
+    test_project: ProjectBuilder,
+    dsn_expr: str,
+    message: str,
+) -> None:
+    test_project.add_query("q", "SELECT 1")
+    test_project.write_queries()
+
+    with pytest.raises(ValueError, match=message):
+        generate_sql_module(
+            schema_path=Path("schema.sql"),
+            module_full_name=test_project.module_full_name,
+            dsn_expr=dsn_expr,
+            src_path=test_project.src_path,
+            tempdir_path=test_project.src_path,
+        )
+
+
+def test_dsn_expression_rejects_non_string_value(
+    test_project: ProjectBuilder,
+) -> None:
+    (test_project.app_dir / "config.py").write_text("DSN = 42\n", encoding="utf-8")
+    test_project.add_query("q", "SELECT 1")
+    test_project.write_queries()
+    if str(test_project.src_path) not in sys.path:
+        sys.path.insert(0, str(test_project.src_path))
+
+    with pytest.raises(TypeError, match="must evaluate to str, got: int"):
+        generate_sql_module(
+            schema_path=Path("schema.sql"),
+            module_full_name=test_project.module_full_name,
+            dsn_expr=f"{test_project.app_pkg}.config:DSN",
+            src_path=test_project.src_path,
+            tempdir_path=test_project.src_path,
+        )
 
 
 def test_dsn_expr_with_factory_call_generates_valid_python(
@@ -519,6 +633,54 @@ def test_pool_options_expr_invalid_fails_during_generation(
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
     )
     assert not generated_path.exists()
+
+
+def test_pool_options_expression_rejects_non_dict_value(
+    test_project: ProjectBuilder,
+) -> None:
+    (test_project.app_dir / "config.py").write_text(
+        f'DSN = "{test_project.dsn}"\nPOOL_OPTIONS = []\n',
+        encoding="utf-8",
+    )
+    test_project.add_query("q", "SELECT 1")
+    test_project.write_queries()
+    if str(test_project.src_path) not in sys.path:
+        sys.path.insert(0, str(test_project.src_path))
+
+    with pytest.raises(TypeError, match="must evaluate to dict, got: list"):
+        generate_sql_module(
+            schema_path=Path("schema.sql"),
+            module_full_name=test_project.module_full_name,
+            dsn_expr=f"{test_project.app_pkg}.config:DSN",
+            pool_options_expr=f"{test_project.app_pkg}.config:POOL_OPTIONS",
+            src_path=test_project.src_path,
+            tempdir_path=test_project.src_path,
+        )
+
+
+def test_sqlc_debug_output_tracks_the_latest_generation(
+    test_project: ProjectBuilder,
+) -> None:
+    debug_path = test_project.root / "debug"
+    test_project.set_queries_source('testdb_sql("SELEC 1")\n')
+
+    with pytest.raises(SQLGenerationError):
+        test_project.generate_no_import(debug_path=debug_path)
+
+    out_path = debug_path / "out.json"
+    assert not out_path.exists()
+
+    test_project.set_queries_source('testdb_sql("SELECT 1")\n')
+
+    test_project.generate_no_import(debug_path=debug_path)
+
+    assert out_path.is_file()
+
+    test_project.set_queries_source('testdb_sql("SELEC 1")\n')
+    with pytest.raises(SQLGenerationError):
+        test_project.generate_no_import(debug_path=debug_path)
+
+    assert not out_path.exists()
 
 
 def test_pool_options_expr_not_set(test_project: ProjectBuilder) -> None:

@@ -18,6 +18,7 @@ from iron_sql.runtime import register_enums
 from iron_sql.runtime import typed_array_row
 from iron_sql.runtime import typed_json_scalar_row
 from iron_sql.runtime import typed_scalar_row
+from iron_sql.runtime import typed_value_row
 from tests.json_models import UserMetadata
 
 if TYPE_CHECKING:
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from typing import Any
 
     import psycopg
+    from psycopg.rows import BaseRowFactory
 
     from tests.conftest import ProjectBuilder
 
@@ -170,6 +172,18 @@ async def test_pool_preserves_application_name_from_pool_options_kwargs() -> Non
     await pool.psycopg_pool.close()
 
 
+async def test_pool_explicit_application_name_overrides_pool_options() -> None:
+    pool = ConnectionPool(
+        "postgresql://example.invalid/db",
+        application_name="explicit",
+        pool_options={"kwargs": {"application_name": "from-pool-options"}},
+    )
+    kwargs = pool.psycopg_pool.kwargs
+    assert isinstance(kwargs, dict)
+    assert kwargs["application_name"] == "explicit"
+    await pool.psycopg_pool.close()
+
+
 async def test_typed_scalar_row_type_mismatch(pool: ConnectionPool) -> None:
     async with (
         pool.connection() as conn,
@@ -188,6 +202,27 @@ async def test_typed_scalar_row_int_array(pool: ConnectionPool) -> None:
         await cur.execute("SELECT ARRAY[1, 2, 3]::int[]")
         row = await cur.fetchone()
         assert row == [1, 2, 3]
+
+
+async def test_typed_value_row_not_null_raises_on_none(pool: ConnectionPool) -> None:
+    row_factory: BaseRowFactory[object] = typed_value_row(not_null=True)
+    async with (
+        pool.connection() as conn,
+        conn.cursor(row_factory=row_factory) as cur,
+    ):
+        await cur.execute("SELECT NULL::int")
+        with pytest.raises(TypeError, match="Expected non-null value"):
+            await cur.fetchone()
+
+
+async def test_typed_array_row_not_null_raises_on_none(pool: ConnectionPool) -> None:
+    async with (
+        pool.connection() as conn,
+        conn.cursor(row_factory=typed_array_row(int, not_null=True)) as cur,
+    ):
+        await cur.execute("SELECT NULL::int[]")
+        with pytest.raises(TypeError, match="Expected non-null value"):
+            await cur.fetchone()
 
 
 async def test_typed_scalar_row_array_type_mismatch(pool: ConnectionPool) -> None:

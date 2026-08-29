@@ -125,4 +125,5 @@ data_file = ".coverage/db.sqlite"
 directory = ".coverage/htmlcov"
 
 [tool.coverage.report]
-exclude_also = ["@overload"]
+exclude_also = ["@overload", "raise AssertionError"]
+fail_under = 99
