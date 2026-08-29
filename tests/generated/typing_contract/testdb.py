@@ -27,6 +27,7 @@ import psycopg.sql
 import psycopg.types.json
 from iron_sql import runtime
 from tests.generated.typing_contract.settings import DSN
+import tests.json_models
 
 
 class TestdbUserStatus(StrEnum):
@@ -82,7 +83,24 @@ async def testdb_notify(
 
 
 @dataclass(kw_only=True)
-class QueryResult_85b3f3336318688059f120dc7d00bb56:
+@runtime.json_validated(metadata=tests.json_models.UserMetadata)
+class TestdbUser:
+    id: uuid.UUID
+    username: builtins.str
+    email: builtins.str | None
+    is_active: builtins.bool
+    created_at: datetime.datetime
+    metadata: tests.json_models.UserMetadata | None
+
+
+@dataclass(kw_only=True)
+class QueryResult_ae0ea94ad691b4479a7b95db94c4750b:
+    id: uuid.UUID
+    is_active: builtins.bool
+
+
+@dataclass(kw_only=True)
+class UserSummary:
     id: uuid.UUID
     username: builtins.str
 
@@ -91,20 +109,20 @@ class Query[T](runtime.Query[T]):
     _connection_factory = builtins.staticmethod(testdb_connection)
 
 
-class Query_45072195926059131e62fc865cd706fe(Query[None]):
-    _locations = ('queries.py:3',)
+class Query_aefd58f414a4192e018fb56f526bb078(Query[None]):
+    _locations = ('queries.py:14',)
 
-    _stmt = psycopg.sql.SQL('INSERT INTO users (id, username) VALUES ($1, $2)')
+    _stmt = psycopg.sql.SQL('INSERT INTO users (id, username, metadata) VALUES ($1, $2, $3)')
 
     _row_factory = builtins.staticmethod(psycopg.rows.scalar_row)
 
-    async def execute(self, id: uuid.UUID, username: builtins.str) -> None:
-        async with self._client_cursor((id, username)):
+    async def execute(self, id: uuid.UUID, username: builtins.str, metadata: tests.json_models.UserMetadata | None) -> None:
+        async with self._client_cursor((id, username, psycopg.types.json.Jsonb(runtime.dump_json_value(tests.json_models.UserMetadata, metadata)) if metadata is not None else None)):
             pass
 
 
 class Query_d00778f4f37e758a2a36e96708da72a8(Query[uuid.UUID]):
-    _locations = ('queries.py:4',)
+    _locations = ('queries.py:19',)
 
     _stmt = psycopg.sql.SQL('SELECT id FROM users ORDER BY created_at')
 
@@ -126,54 +144,8 @@ class Query_d00778f4f37e758a2a36e96708da72a8(Query[uuid.UUID]):
         return self._server_cursor(None)
 
 
-class Query_11608bed7f6113a041c01d898088ce51(Query[QueryResult_85b3f3336318688059f120dc7d00bb56]):
-    _locations = ('queries.py:5',)
-
-    _stmt = psycopg.sql.SQL('SELECT id, username FROM users WHERE id = $1')
-
-    _row_factory = builtins.staticmethod(psycopg.rows.class_row(QueryResult_85b3f3336318688059f120dc7d00bb56))
-
-    async def query_all_rows(self, id: uuid.UUID) -> builtins.list[QueryResult_85b3f3336318688059f120dc7d00bb56]:
-        async with self._client_cursor((id,)) as cur:
-            return await cur.fetchall()
-
-    async def query_single_row(self, id: uuid.UUID) -> QueryResult_85b3f3336318688059f120dc7d00bb56:
-        async with self._client_cursor((id,)) as cur:
-            return runtime.get_one_row(await cur.fetchmany(2))
-
-    async def query_optional_row(self, id: uuid.UUID) -> QueryResult_85b3f3336318688059f120dc7d00bb56 | None:
-        async with self._client_cursor((id,)) as cur:
-            return runtime.get_one_row_or_none(await cur.fetchmany(2))
-
-    def query_stream(self, id: uuid.UUID) -> AbstractAsyncContextManager[AsyncIterator[QueryResult_85b3f3336318688059f120dc7d00bb56]]:
-        return self._server_cursor((id,))
-
-
-class Query_c2301ffb9a38594af9ec578e392546a1(Query[TestdbUserStatus]):
-    _locations = ('queries.py:6',)
-
-    _stmt = psycopg.sql.SQL("SELECT 'active'::user_status as status")
-
-    _row_factory = builtins.staticmethod(runtime.typed_scalar_row(TestdbUserStatus, not_null=True))
-
-    async def query_all_rows(self) -> builtins.list[TestdbUserStatus]:
-        async with self._client_cursor(None) as cur:
-            return await cur.fetchall()
-
-    async def query_single_row(self) -> TestdbUserStatus:
-        async with self._client_cursor(None) as cur:
-            return runtime.get_one_row(await cur.fetchmany(2))
-
-    async def query_optional_row(self) -> TestdbUserStatus | None:
-        async with self._client_cursor(None) as cur:
-            return runtime.get_one_row_or_none(await cur.fetchmany(2))
-
-    def query_stream(self) -> AbstractAsyncContextManager[AsyncIterator[TestdbUserStatus]]:
-        return self._server_cursor(None)
-
-
 class Query_7f2a3838362e7f730e2a1afa3a823d65(Query[builtins.str | None]):
-    _locations = ('queries.py:7',)
+    _locations = ('queries.py:28',)
 
     _stmt = psycopg.sql.SQL('SELECT email FROM users WHERE id = $1')
 
@@ -195,25 +167,201 @@ class Query_7f2a3838362e7f730e2a1afa3a823d65(Query[builtins.str | None]):
         return self._server_cursor((id,))
 
 
+class Query_2af3c6fe92023709951b72feac0c35b3(Query[uuid.UUID]):
+    _locations = ('queries.py:32',)
+
+    _stmt = psycopg.sql.SQL('SELECT id FROM users WHERE id = $1 AND username = $2')
+
+    _row_factory = builtins.staticmethod(runtime.typed_scalar_row(uuid.UUID, not_null=True))
+
+    async def query_all_rows(self, id: uuid.UUID, *, username: builtins.str) -> builtins.list[uuid.UUID]:
+        async with self._client_cursor((id, username)) as cur:
+            return await cur.fetchall()
+
+    async def query_single_row(self, id: uuid.UUID, *, username: builtins.str) -> uuid.UUID:
+        async with self._client_cursor((id, username)) as cur:
+            return runtime.get_one_row(await cur.fetchmany(2))
+
+    async def query_optional_row(self, id: uuid.UUID, *, username: builtins.str) -> uuid.UUID | None:
+        async with self._client_cursor((id, username)) as cur:
+            return runtime.get_one_row_or_none(await cur.fetchmany(2))
+
+    def query_stream(self, id: uuid.UUID, *, username: builtins.str) -> AbstractAsyncContextManager[AsyncIterator[uuid.UUID]]:
+        return self._server_cursor((id, username))
+
+
+class Query_67d294eb2aa49a30f0564238c18fe0d7(Query[TestdbUserStatus]):
+    _locations = ('queries.py:38',)
+
+    _stmt = psycopg.sql.SQL('SELECT $1::user_status as status')
+
+    _row_factory = builtins.staticmethod(runtime.typed_scalar_row(TestdbUserStatus, not_null=True))
+
+    async def query_all_rows(self, param_1: TestdbUserStatus) -> builtins.list[TestdbUserStatus]:
+        async with self._client_cursor((param_1,)) as cur:
+            return await cur.fetchall()
+
+    async def query_single_row(self, param_1: TestdbUserStatus) -> TestdbUserStatus:
+        async with self._client_cursor((param_1,)) as cur:
+            return runtime.get_one_row(await cur.fetchmany(2))
+
+    async def query_optional_row(self, param_1: TestdbUserStatus) -> TestdbUserStatus | None:
+        async with self._client_cursor((param_1,)) as cur:
+            return runtime.get_one_row_or_none(await cur.fetchmany(2))
+
+    def query_stream(self, param_1: TestdbUserStatus) -> AbstractAsyncContextManager[AsyncIterator[TestdbUserStatus]]:
+        return self._server_cursor((param_1,))
+
+
+class Query_4e34564fce531b9530ef5c7267c47842(Query[Sequence[builtins.int]]):
+    _locations = ('queries.py:44',)
+
+    _stmt = psycopg.sql.SQL('SELECT $1::int[] as values')
+
+    _row_factory = builtins.staticmethod(runtime.typed_array_row(builtins.int, not_null=True))
+
+    async def query_all_rows(self, values: Sequence[builtins.int]) -> builtins.list[Sequence[builtins.int]]:
+        async with self._client_cursor((values,)) as cur:
+            return await cur.fetchall()
+
+    async def query_single_row(self, values: Sequence[builtins.int]) -> Sequence[builtins.int]:
+        async with self._client_cursor((values,)) as cur:
+            return runtime.get_one_row(await cur.fetchmany(2))
+
+    async def query_optional_row(self, values: Sequence[builtins.int]) -> Sequence[builtins.int] | None:
+        async with self._client_cursor((values,)) as cur:
+            return runtime.get_one_row_or_none(await cur.fetchmany(2))
+
+    def query_stream(self, values: Sequence[builtins.int]) -> AbstractAsyncContextManager[AsyncIterator[Sequence[builtins.int]]]:
+        return self._server_cursor((values,))
+
+
+class Query_49f142cbc4ed9ba7be4637b5ba765c67(Query[tests.json_models.UserMetadata | None]):
+    _locations = ('queries.py:50',)
+
+    _stmt = psycopg.sql.SQL('SELECT metadata FROM users WHERE id = $1')
+
+    _row_factory = builtins.staticmethod(runtime.typed_json_scalar_row(tests.json_models.UserMetadata, not_null=False))
+
+    async def query_all_rows(self, id: uuid.UUID) -> builtins.list[tests.json_models.UserMetadata | None]:
+        async with self._client_cursor((id,)) as cur:
+            return await cur.fetchall()
+
+    async def query_single_row(self, id: uuid.UUID) -> tests.json_models.UserMetadata | None:
+        async with self._client_cursor((id,)) as cur:
+            return runtime.get_one_row(await cur.fetchmany(2))
+
+    async def query_optional_row(self, id: uuid.UUID) -> tests.json_models.UserMetadata | None:
+        async with self._client_cursor((id,)) as cur:
+            return runtime.get_one_row_or_none(await cur.fetchmany(2))
+
+    def query_stream(self, id: uuid.UUID) -> AbstractAsyncContextManager[AsyncIterator[tests.json_models.UserMetadata | None]]:
+        return self._server_cursor((id,))
+
+
+class Query_0467de631347843cd178d4f09ab5945a(Query[TestdbUser]):
+    _locations = ('queries.py:56',)
+
+    _stmt = psycopg.sql.SQL('SELECT id, username, email, is_active, created_at, metadata FROM users WHERE id = $1')
+
+    _row_factory = builtins.staticmethod(psycopg.rows.class_row(TestdbUser))
+
+    async def query_all_rows(self, id: uuid.UUID) -> builtins.list[TestdbUser]:
+        async with self._client_cursor((id,)) as cur:
+            return await cur.fetchall()
+
+    async def query_single_row(self, id: uuid.UUID) -> TestdbUser:
+        async with self._client_cursor((id,)) as cur:
+            return runtime.get_one_row(await cur.fetchmany(2))
+
+    async def query_optional_row(self, id: uuid.UUID) -> TestdbUser | None:
+        async with self._client_cursor((id,)) as cur:
+            return runtime.get_one_row_or_none(await cur.fetchmany(2))
+
+    def query_stream(self, id: uuid.UUID) -> AbstractAsyncContextManager[AsyncIterator[TestdbUser]]:
+        return self._server_cursor((id,))
+
+
+class Query_d5a3b734624279fdec82161e47456790(Query[QueryResult_ae0ea94ad691b4479a7b95db94c4750b]):
+    _locations = ('queries.py:61',)
+
+    _stmt = psycopg.sql.SQL('SELECT id, is_active FROM users WHERE id = $1')
+
+    _row_factory = builtins.staticmethod(psycopg.rows.class_row(QueryResult_ae0ea94ad691b4479a7b95db94c4750b))
+
+    async def query_all_rows(self, id: uuid.UUID) -> builtins.list[QueryResult_ae0ea94ad691b4479a7b95db94c4750b]:
+        async with self._client_cursor((id,)) as cur:
+            return await cur.fetchall()
+
+    async def query_single_row(self, id: uuid.UUID) -> QueryResult_ae0ea94ad691b4479a7b95db94c4750b:
+        async with self._client_cursor((id,)) as cur:
+            return runtime.get_one_row(await cur.fetchmany(2))
+
+    async def query_optional_row(self, id: uuid.UUID) -> QueryResult_ae0ea94ad691b4479a7b95db94c4750b | None:
+        async with self._client_cursor((id,)) as cur:
+            return runtime.get_one_row_or_none(await cur.fetchmany(2))
+
+    def query_stream(self, id: uuid.UUID) -> AbstractAsyncContextManager[AsyncIterator[QueryResult_ae0ea94ad691b4479a7b95db94c4750b]]:
+        return self._server_cursor((id,))
+
+
+class Query_fe802254249b32ca3b5356528710e390_UserSummary(Query[UserSummary]):
+    _locations = ('queries.py:68',)
+
+    _stmt = psycopg.sql.SQL('SELECT id, username FROM users')
+
+    _row_factory = builtins.staticmethod(psycopg.rows.class_row(UserSummary))
+
+    async def query_all_rows(self) -> builtins.list[UserSummary]:
+        async with self._client_cursor(None) as cur:
+            return await cur.fetchall()
+
+    async def query_single_row(self) -> UserSummary:
+        async with self._client_cursor(None) as cur:
+            return runtime.get_one_row(await cur.fetchmany(2))
+
+    async def query_optional_row(self) -> UserSummary | None:
+        async with self._client_cursor(None) as cur:
+            return runtime.get_one_row_or_none(await cur.fetchmany(2))
+
+    def query_stream(self) -> AbstractAsyncContextManager[AsyncIterator[UserSummary]]:
+        return self._server_cursor(None)
+
+
 _QUERIES: builtins.dict[builtins.str, builtins.type[Query[Any]]] = {
-    'INSERT INTO users (id, username) VALUES ($1, $2)': Query_45072195926059131e62fc865cd706fe,
+    'INSERT INTO users (id, username, metadata) VALUES ($1, $2, $3)': Query_aefd58f414a4192e018fb56f526bb078,
     'SELECT id FROM users ORDER BY created_at': Query_d00778f4f37e758a2a36e96708da72a8,
-    'SELECT id, username FROM users WHERE id = $1': Query_11608bed7f6113a041c01d898088ce51,
-    "SELECT 'active'::user_status as status": Query_c2301ffb9a38594af9ec578e392546a1,
-    'SELECT email FROM users WHERE id = $1': Query_7f2a3838362e7f730e2a1afa3a823d65
+    'SELECT email FROM users WHERE id = $1': Query_7f2a3838362e7f730e2a1afa3a823d65,
+    'SELECT id FROM users WHERE id = $1 AND username = @username': Query_2af3c6fe92023709951b72feac0c35b3,
+    'SELECT $1::user_status as status': Query_67d294eb2aa49a30f0564238c18fe0d7,
+    'SELECT @values::int[] as values': Query_4e34564fce531b9530ef5c7267c47842,
+    'SELECT metadata FROM users WHERE id = $1': Query_49f142cbc4ed9ba7be4637b5ba765c67,
+    'SELECT * FROM users WHERE id = $1': Query_0467de631347843cd178d4f09ab5945a,
+    'SELECT id, is_active FROM users WHERE id = $1': Query_d5a3b734624279fdec82161e47456790,
+    'SELECT id, username FROM users': Query_fe802254249b32ca3b5356528710e390_UserSummary
 }
 
 
 @overload
-def testdb_sql(sql: Literal['INSERT INTO users (id, username) VALUES ($1, $2)']) -> Query_45072195926059131e62fc865cd706fe: ...
+def testdb_sql(sql: Literal['INSERT INTO users (id, username, metadata) VALUES ($1, $2, $3)']) -> Query_aefd58f414a4192e018fb56f526bb078: ...
 @overload
 def testdb_sql(sql: Literal['SELECT id FROM users ORDER BY created_at']) -> Query_d00778f4f37e758a2a36e96708da72a8: ...
 @overload
-def testdb_sql(sql: Literal['SELECT id, username FROM users WHERE id = $1']) -> Query_11608bed7f6113a041c01d898088ce51: ...
-@overload
-def testdb_sql(sql: Literal["SELECT 'active'::user_status as status"]) -> Query_c2301ffb9a38594af9ec578e392546a1: ...
-@overload
 def testdb_sql(sql: Literal['SELECT email FROM users WHERE id = $1']) -> Query_7f2a3838362e7f730e2a1afa3a823d65: ...
+@overload
+def testdb_sql(sql: Literal['SELECT id FROM users WHERE id = $1 AND username = @username']) -> Query_2af3c6fe92023709951b72feac0c35b3: ...
+@overload
+def testdb_sql(sql: Literal['SELECT $1::user_status as status']) -> Query_67d294eb2aa49a30f0564238c18fe0d7: ...
+@overload
+def testdb_sql(sql: Literal['SELECT @values::int[] as values']) -> Query_4e34564fce531b9530ef5c7267c47842: ...
+@overload
+def testdb_sql(sql: Literal['SELECT metadata FROM users WHERE id = $1']) -> Query_49f142cbc4ed9ba7be4637b5ba765c67: ...
+@overload
+def testdb_sql(sql: Literal['SELECT * FROM users WHERE id = $1']) -> Query_0467de631347843cd178d4f09ab5945a: ...
+@overload
+def testdb_sql(sql: Literal['SELECT id, is_active FROM users WHERE id = $1']) -> Query_d5a3b734624279fdec82161e47456790: ...
+@overload
+def testdb_sql(sql: Literal['SELECT id, username FROM users'], row_type: Literal['UserSummary']) -> Query_fe802254249b32ca3b5356528710e390_UserSummary: ...
 @overload
 def testdb_sql(sql: builtins.str) -> Query[Any]: ...
 

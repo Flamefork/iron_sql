@@ -1,3 +1,4 @@
+import re
 import textwrap
 from pathlib import Path
 
@@ -11,55 +12,96 @@ generated_package(
     "typing_contract",
     schema=SCHEMA_SQL,
     queries="""
-        from tests.generated.typing_contract.testdb import testdb_sql
+        import uuid
+        from collections.abc import AsyncIterator
+        from collections.abc import Sequence
+        from contextlib import AbstractAsyncContextManager
+        from typing import assert_type
+        from typing import reveal_type
 
-        testdb_sql("INSERT INTO users (id, username) VALUES ($1, $2)")
-        testdb_sql("SELECT id FROM users ORDER BY created_at")
-        testdb_sql("SELECT id, username FROM users WHERE id = $1")
-        testdb_sql("SELECT 'active'::user_status as status")
-        testdb_sql("SELECT email FROM users WHERE id = $1")
+        from tests.generated.typing_contract import testdb as api
+        from tests.generated.typing_contract.testdb import testdb_sql
+        from tests.json_models import UserMetadata
+
+
+        async def check(uid: uuid.UUID, metadata: UserMetadata) -> None:
+            command = testdb_sql(
+                "INSERT INTO users (id, username, metadata) VALUES ($1, $2, $3)"
+            )
+            assert_type(await command.execute(uid, "name", metadata), None)
+
+            scalar = testdb_sql("SELECT id FROM users ORDER BY created_at")
+            assert_type(await scalar.query_all_rows(), list[uuid.UUID])
+            assert_type(await scalar.query_single_row(), uuid.UUID)
+            assert_type(await scalar.query_optional_row(), uuid.UUID | None)
+            assert_type(
+                scalar.query_stream(),
+                AbstractAsyncContextManager[AsyncIterator[uuid.UUID]],
+            )
+
+            nullable_query = testdb_sql("SELECT email FROM users WHERE id = $1")
+            assert_type(await nullable_query.query_single_row(uid), str | None)
+
+            assert_type(
+                await testdb_sql(
+                    "SELECT id FROM users WHERE id = $1 AND username = @username"
+                ).query_single_row(uid, username="name"),
+                uuid.UUID,
+            )
+
+            enum_query = testdb_sql("SELECT $1::user_status as status")
+            assert_type(
+                await enum_query.query_single_row(api.TestdbUserStatus.ACTIVE),
+                api.TestdbUserStatus,
+            )
+
+            array_query = testdb_sql("SELECT @values::int[] as values")
+            assert_type(
+                await array_query.query_single_row(values=[1, 2]),
+                Sequence[int],
+            )
+
+            json_query = testdb_sql("SELECT metadata FROM users WHERE id = $1")
+            assert_type(
+                await json_query.query_single_row(uid),
+                UserMetadata | None,
+            )
+
+            user_query = testdb_sql("SELECT * FROM users WHERE id = $1")
+            user = await user_query.query_single_row(uid)
+            assert_type(user, api.TestdbUser)
+            assert_type(user.metadata, UserMetadata | None)
+
+            anonymous = await testdb_sql(
+                "SELECT id, is_active FROM users WHERE id = $1"
+            ).query_single_row(uid)
+            assert_type(anonymous.id, uuid.UUID)
+            assert_type(anonymous.is_active, bool)
+            reveal_type(anonymous)
+
+            explicit = testdb_sql(
+                "SELECT id, username FROM users",
+                row_type="UserSummary",
+            )
+            assert_type(await explicit.query_single_row(), api.UserSummary)
     """,
+    json_model_overrides={
+        "users.metadata": "tests.json_models:UserMetadata",
+    },
 )
 
 GENERATED = Path(__file__).parent / "generated"
 
 CHECK_SOURCES = {
-    "valid.py": """
-        import uuid
+    "dynamic.py": """
+        from typing import Any
+        from typing import assert_type
 
-        from tests.generated.json_users_metadata import testdb as json_api
         from tests.generated.typing_contract import testdb as api
 
 
-        async def check(uid: uuid.UUID) -> None:
-            executed = await api.testdb_sql(
-                "INSERT INTO users (id, username) VALUES ($1, $2)"
-            ).execute(uid, "name")
-            reveal_type(executed)
-            scalar = await api.testdb_sql(
-                "SELECT id FROM users ORDER BY created_at"
-            ).query_single_row()
-            reveal_type(scalar)
-            structured = await api.testdb_sql(
-                "SELECT id, username FROM users WHERE id = $1"
-            ).query_single_row(uid)
-            reveal_type(structured)
-            enum_value = await api.testdb_sql(
-                "SELECT 'active'::user_status as status"
-            ).query_single_row()
-            reveal_type(enum_value)
-            nullable = await api.testdb_sql(
-                "SELECT email FROM users WHERE id = $1"
-            ).query_single_row(uid)
-            reveal_type(nullable)
-            json_model = await json_api.testdb_sql(
-                "SELECT metadata FROM users WHERE id = $1"
-            ).query_single_row(uid)
-            reveal_type(json_model)
-
-
-        def dynamic(sql: str) -> None:
-            reveal_type(api.testdb_sql(sql))
+        def check(sql: str) -> None:
+            assert_type(api.testdb_sql(sql), api.Query[Any])
     """,
     "invalid.py": """
         import uuid
@@ -69,16 +111,19 @@ CHECK_SOURCES = {
 
         async def check(uid: uuid.UUID) -> None:
             await api.testdb_sql(
-                "INSERT INTO users (id, username) VALUES ($1, $2)"
-            ).execute("not-a-uuid", "name")
+                "INSERT INTO users (id, username, metadata) VALUES ($1, $2, $3)"
+            ).execute("not-a-uuid", "name", None)
+            await api.testdb_sql(
+                "SELECT id FROM users WHERE id = $1 AND username = @username"
+            ).query_single_row(uid)
             await api.testdb_sql(
                 "SELECT id FROM users ORDER BY created_at"
             ).execute()
             await api.testdb_sql(
-                "INSERT INTO users (id, username) VALUES ($1, $2)"
-            ).query_single_row(uid, "name")
+                "INSERT INTO users (id, username, metadata) VALUES ($1, $2, $3)"
+            ).query_single_row(uid, "name", None)
             api.testdb_sql(
-                "SELECT id, username FROM users WHERE id = $1",
+                "SELECT id, username FROM users",
                 row_type="Wrong",
             )
     """,
@@ -115,27 +160,34 @@ def test_generated_typing_contract(tmp_path: Path) -> None:
     generated_files = len(list(GENERATED.glob("*/*.py")))
     assert report.summary.files_analyzed >= generated_files + len(check_paths)
 
-    valid = diagnostics_for(report, check_paths["valid.py"])
-    assert [item for item in valid if item.severity == "error"] == []
-    assert [item.message for item in valid if item.severity == "information"] == [
-        'Type of "executed" is "None"',
-        'Type of "scalar" is "UUID"',
-        'Type of "structured" is "QueryResult_85b3f3336318688059f120dc7d00bb56"',
-        'Type of "enum_value" is "TestdbUserStatus"',
-        'Type of "nullable" is "str | None"',
-        'Type of "json_model" is "UserMetadata | None"',
-        'Type of "api.testdb_sql(sql)" is "Query[Any]"',
-    ]
+    dynamic = diagnostics_for(report, check_paths["dynamic.py"])
+    assert [item for item in dynamic if item.severity == "error"] == []
+
+    generated_queries = diagnostics_for(
+        report,
+        GENERATED / "typing_contract" / "queries.py",
+    )
+    information = [item for item in generated_queries if item.severity == "information"]
+    assert len(information) == 1
+    assert re.fullmatch(
+        r'Type of "anonymous" is "QueryResult_[0-9a-f]{32}"',
+        information[0].message,
+    )
 
     invalid = [
         item
         for item in diagnostics_for(report, check_paths["invalid.py"])
-        if item.severity == "error" and item.rule != "reportUnknownMemberType"
+        if item.severity == "error"
     ]
-    assert [item.range.start.line for item in invalid] == [8, 11, 14, 15]
-    assert [item.rule for item in invalid] == [
-        "reportArgumentType",
-        "reportAttributeAccessIssue",
-        "reportAttributeAccessIssue",
-        "reportCallIssue",
+    assert [(item.range.start.line, item.rule) for item in invalid] == [
+        (8, "reportArgumentType"),
+        (9, "reportCallIssue"),
+        (12, "reportUnknownMemberType"),
+        (14, "reportAttributeAccessIssue"),
+        (15, "reportUnknownMemberType"),
+        (17, "reportAttributeAccessIssue"),
+        (20, "reportArgumentType"),
     ]
+    assert [
+        item for item in report.general_diagnostics if item.severity == "error"
+    ] == invalid
