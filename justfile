@@ -7,8 +7,12 @@ lint:
     uv run ruff check .
     uv run basedpyright
 
-test +args="":
-    uv run pytest -vv --color=yes --showlocals --durations=10 --cov=iron_sql '{{ args }}'
+test:
+    uv run pytest -vv --color=yes --showlocals --durations=10 --cov=iron_sql
+
+[positional-arguments]
+pytest *args:
+    uv run pytest -vv --color=yes --showlocals --durations=10 "$@"
 
 coverage:
     rm -rf .coverage/*
