@@ -1291,6 +1291,13 @@ def query_class_render_name_issues(
                 class_name=spec.class_name,
             )
         )
+        issues.extend(
+            name_claim_issues(
+                scope,
+                list(step.eager_reads),
+                class_name=spec.class_name,
+            )
+        )
         for read in step.eager_reads:
             binding_name = mangle_class_name(
                 spec.class_name,

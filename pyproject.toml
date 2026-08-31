@@ -42,6 +42,8 @@ build-backend = "uv_build"
 dev = [
     "iron-sql[codegen]",
     "basedpyright>=1.31.7",
+    "hypothesis>=6.165.2",
+    "mutmut>=3.7.0,<4",
     "psycopg[binary]>=3.3.2",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
@@ -52,11 +54,15 @@ dev = [
 ]
 
 [tool.basedpyright]
+include = ["src", "tests", "example"]
 typeCheckingMode = "all"
 deprecateTypingAliases = true
 reportUnannotatedClassAttribute = "none"
 reportUnusedCallResult = "none"
 reportExplicitAny = "none"
+
+[tool.mutmut]
+also_copy = ["README.md", "example/"]
 
 [tool.ruff]
 target-version = "py313"

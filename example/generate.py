@@ -20,7 +20,7 @@ def generate_db_module(dsn: str, schema_path: Path, src_path: Path) -> bool:
 
     return generate_sql_module(
         schema_path=schema_path,
-        module_full_name="example.db.mydb",
+        module_full_name="db.mydb",
         dsn_expr="example.config:DSN",
         pool_options_expr="example.config:POOL_OPTIONS",
         src_path=src_path,
@@ -32,12 +32,12 @@ def generate_db_module(dsn: str, schema_path: Path, src_path: Path) -> bool:
 
 
 example_dir = Path(__file__).parent
-schema_path = example_dir / "schema.sql"
-src_path = example_dir.parent
+schema_path = Path("schema.sql")
+src_path = example_dir
 
 if __name__ == "__main__":
     with PostgresContainer("postgres:17-alpine") as postgres:
         dsn = postgres.get_connection_url(driver=None)
-        init_db(dsn, schema_path)
+        init_db(dsn, src_path / schema_path)
         changed = generate_db_module(dsn, schema_path, src_path)
         print("Updated SQL module:", changed)

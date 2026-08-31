@@ -487,6 +487,68 @@ def test_nfkc_unstable_custom_class_names_are_rejected(
 
 
 @pytest.mark.parametrize(
+    ("class_name", "accepted"),
+    [
+        ("SafeEntity", True),
+        ("class", False),
+        ("bad-name", False),
+        ("K", False),
+        ("__value", False),
+        ("Query", False),
+    ],
+)
+def test_generated_class_binding_name_envelope(
+    test_project: ProjectBuilder,
+    class_name: str,
+    accepted: bool,
+) -> None:
+    test_project.add_query("entity", "SELECT * FROM users")
+
+    def custom_to_pascal(value: str) -> str:
+        if value.endswith("_user"):
+            return class_name
+        return alias_generators.to_pascal(value)
+
+    if accepted:
+        changed, _ = test_project.generate_checked(to_pascal_fn=custom_to_pascal)
+        assert changed is True
+        return
+    with pytest.raises(ValueError, match=r"^Invalid generated Python names:"):
+        test_project.generate_no_import(to_pascal_fn=custom_to_pascal)
+
+
+@pytest.mark.parametrize(
+    ("row_type", "accepted"),
+    [
+        ("SafeRow", True),
+        ("class", False),
+        ("bad-name", False),
+        ("K", False),
+        ("__value", False),
+        ("Query", False),
+    ],
+)
+def test_explicit_row_type_name_envelope(
+    test_project: ProjectBuilder,
+    row_type: str,
+    accepted: bool,
+) -> None:
+    test_project.add_query(
+        "row",
+        "SELECT id, username FROM users",
+        row_type=row_type,
+    )
+
+    if accepted:
+        module = test_project.generate()
+        generated_class = cast("object", vars(module)[row_type])
+        assert inspect.isclass(generated_class)
+        return
+    with pytest.raises(ValueError, match=r"^Invalid generated Python names:"):
+        test_project.generate_no_import()
+
+
+@pytest.mark.parametrize(
     "sql",
     [
         "UPDATE users SET username = @__value",
@@ -515,7 +577,7 @@ def test_non_mangled_dunder_parameter_is_allowed(
 
 
 @pytest.mark.parametrize(
-    "class_name", ["GeneratedQuery", "_GeneratedQuery", "___", "K"]
+    "class_name", ["GeneratedQuery", "XGeneratedQuery", "_GeneratedQuery", "___", "K"]
 )
 def test_class_binding_matches_python_symtable(class_name: str) -> None:
     source = f"class {class_name}:\n    def method(self, __value): ...\n"
@@ -979,6 +1041,32 @@ def test_safe_module_expression_walrus_binding_is_emitted(
 
     assert changed is True
     assert vars(module)["selected_dsn"] == test_project.dsn
+
+
+def test_private_dunder_module_expression_read_and_binding_are_emitted(
+    test_project: ProjectBuilder,
+) -> None:
+    (test_project.app_dir / "config.py").write_text(
+        f'DSN = "{test_project.dsn}"\n__pool_options = {{}}\n',
+        encoding="utf-8",
+    )
+    test_project.add_query("q", "SELECT 1")
+    test_project.write_queries()
+    if str(test_project.src_path) not in sys.path:
+        sys.path.insert(0, str(test_project.src_path))
+
+    changed = generate_sql_module(
+        schema_path=Path("schema.sql"),
+        module_full_name=test_project.module_full_name,
+        dsn_expr=f"{test_project.app_pkg}.config:(__selected_dsn := DSN)",
+        pool_options_expr=f"{test_project.app_pkg}.config:__pool_options",
+        src_path=test_project.src_path,
+        tempdir_path=test_project.src_path,
+    )
+    module = test_project.import_generated()
+
+    assert changed is True
+    assert vars(module)["__selected_dsn"] == test_project.dsn
 
 
 def test_module_expression_binding_conflicts_with_second_expression(

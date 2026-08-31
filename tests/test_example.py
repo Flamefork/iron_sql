@@ -24,9 +24,10 @@ import os
 from pathlib import Path
 from example.generate import generate_db_module, init_db
 dsn = os.environ["DATABASE_URL"]
-schema_path = Path("example/schema.sql")
-init_db(dsn, schema_path)
-print(generate_db_module(dsn, schema_path, Path()))
+src_path = Path("example")
+schema_path = Path("schema.sql")
+init_db(dsn, src_path / schema_path)
+print(generate_db_module(dsn, schema_path, src_path))
 """,
         ],
         cwd=project_root,

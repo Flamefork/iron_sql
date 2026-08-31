@@ -67,6 +67,8 @@ def basedpyright_report(*check_paths: Path) -> BasedPyrightReport:
             sys.executable,
             "-m",
             "basedpyright",
+            "--pythonpath",
+            sys.executable,
             "--outputjson",
             *(str(check_path) for check_path in check_paths),
         ],

@@ -1,0 +1,23 @@
+name: "Slow checks"
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 0"
+
+jobs:
+  slow:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Install just
+        uses: extractions/setup-just@v3
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+      - name: Fuzz generated names
+        run: just fuzz-generated-names
+      - name: Run mutation survey
+        run: just mutants

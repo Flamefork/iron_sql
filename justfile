@@ -19,6 +19,13 @@ coverage:
     uv run pytest --cov=iron_sql --cov-report=html
     open .coverage/htmlcov/index.html
 
+mutants:
+    uv run mutmut run
+    uv run mutmut results
+
+fuzz-generated-names:
+    uv run python -m tests.fuzz_generated_names
+
 generate-example:
     uv run python -m example.generate
 

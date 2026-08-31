@@ -3,8 +3,10 @@ import symtable
 import typing
 from collections.abc import Iterator
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
+from typing import Literal
 from typing import cast
 
 from iron_sql.codegen.generator import query_method_required_external_reads
@@ -34,6 +36,94 @@ _QUERY_CLASS_BINDINGS = (
         "query_stream",
     },
 )
+
+type GeneratedNameContext = Literal[
+    "class_binding",
+    "class_parameter",
+    "module_expression_binding",
+    "module_expression_read",
+]
+
+
+@dataclass(kw_only=True, frozen=True)
+class CPythonNameObservation:
+    accepted: bool
+    binding: str | None
+    namespace: str
+    syntax_error: str | None
+
+
+def cpython_name_source(
+    spelling: str,
+    context: GeneratedNameContext,
+) -> tuple[str, str]:
+    match context:
+        case "class_binding":
+            return f"class Generated:\n    {spelling} = None\n", "class Generated"
+        case "class_parameter":
+            source = f"class Generated:\n    def method({spelling}): pass\n"
+            return source, "function Generated.method"
+        case "module_expression_binding":
+            return f"({spelling} := None)\n", "module"
+        case "module_expression_read":
+            return f"({spelling})\n", "module"
+
+
+def cpython_name_bindings(
+    module_table: symtable.SymbolTable,
+    context: GeneratedNameContext,
+) -> set[str]:
+    match context:
+        case "class_binding":
+            (class_table,) = module_table.get_children()
+            return symbol_table_bindings(class_table)
+        case "class_parameter":
+            (class_table,) = module_table.get_children()
+            (method_table,) = class_table.get_children()
+            if not isinstance(method_table, symtable.Function):
+                msg = f"expected function table, got {type(method_table).__name__}"
+                raise TypeError(msg)
+            return set(method_table.get_parameters())
+        case "module_expression_binding":
+            return symbol_table_bindings(module_table)
+        case "module_expression_read":
+            return {
+                symbol.get_name()
+                for symbol in module_table.get_symbols()
+                if symbol.is_referenced()
+            }
+
+
+def observe_cpython_name(
+    spelling: str,
+    context: GeneratedNameContext,
+) -> CPythonNameObservation:
+    source, namespace = cpython_name_source(spelling, context)
+    try:
+        compile(source, "generated.py", "exec")
+        module_table = symtable.symtable(source, "generated.py", "exec")
+    except SyntaxError as exc:
+        return CPythonNameObservation(
+            accepted=False,
+            binding=None,
+            namespace=namespace,
+            syntax_error=exc.msg,
+        )
+
+    bindings = cpython_name_bindings(module_table, context)
+    if len(bindings) != 1:
+        return CPythonNameObservation(
+            accepted=False,
+            binding=None,
+            namespace=namespace,
+            syntax_error=f"expression resolves to {len(bindings)} names",
+        )
+    return CPythonNameObservation(
+        accepted=True,
+        binding=next(iter(bindings)),
+        namespace=namespace,
+        syntax_error=None,
+    )
 
 
 def assert_generated_module_contract(module: ModuleType) -> None:
