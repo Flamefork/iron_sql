@@ -288,7 +288,7 @@ wheels = [
 
 [[package]]
 name = "iron-sql"
-version = "1.5.7"
+version = "1.5.8"
 source = { editable = "." }
 dependencies = [
     { name = "psycopg" },
