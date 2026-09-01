@@ -9,6 +9,7 @@ import pytest
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from collections.abc import Iterator
     from pathlib import Path
 
     from iron_sql.runtime import Query
@@ -170,15 +171,33 @@ def test_a_directory_without_an_init_file_is_scanned(
 
 def test_statement_locations_use_whole_tree_order(
     test_project: ProjectBuilder,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ordered_sql = "SELECT 7 AS ordered_value"
-    _write(test_project.src_path, "b.py", f"testdb_sql({ordered_sql!r})\n")
+    middle_sql = "SELECT 8 AS middle_value"
     _write(test_project.src_path, "app/a.py", f"testdb_sql({ordered_sql!r})\n")
     _write(
         test_project.src_path,
-        "app/sub/a.py",
+        "tests/test_a.py",
         f"testdb_sql({ordered_sql!r})\n",
     )
+    _write(test_project.src_path, "middle.py", f"testdb_sql({middle_sql!r})\n")
+
+    path_type = type(test_project.src_path)
+    original_glob = path_type.glob
+    original_walk = path_type.walk
+
+    def reverse_glob(path: Path, pattern: str) -> Iterator[Path]:
+        return iter(reversed(tuple(original_glob(path, pattern))))
+
+    def reverse_walk(path: Path) -> Iterator[tuple[Path, list[str], list[str]]]:
+        for directory, subdirs, names in original_walk(path):
+            subdirs.reverse()
+            names.reverse()
+            yield directory, subdirs, names
+
+    monkeypatch.setattr(path_type, "glob", reverse_glob)
+    monkeypatch.setattr(path_type, "walk", reverse_walk)
 
     test_project.generate_no_import()
 
@@ -187,7 +206,8 @@ def test_statement_locations_use_whole_tree_order(
     )
     generated = generated_path.read_text(encoding="utf-8")
     assert re.findall(r"_locations = (.+)", generated) == [
-        "('app/a.py:1', 'app/sub/a.py:1', 'b.py:1')"
+        "('app/a.py:1', 'tests/test_a.py:1')",
+        "('middle.py:1',)",
     ]
 
 
