@@ -1,9 +1,11 @@
+import atexit
 import contextlib
 import importlib
 import json
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 import uuid
 from collections.abc import AsyncGenerator
@@ -11,6 +13,7 @@ from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -100,6 +103,28 @@ class GeneratedPackage:
 _GENERATED_PACKAGES: dict[str, GeneratedPackage] = {}
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--update-generated",
+        action="store_true",
+        help="Write generated test packages to tests/generated.",
+    )
+
+
+def generated_settings(
+    dsn: str,
+    pool_options: dict[str, object] | None,
+) -> str:
+    settings = f"DSN = {json.dumps(dsn)}\n"
+    if pool_options is not None:
+        settings = (
+            "from iron_sql import PoolOptions\n\n"
+            + settings
+            + f"POOL_OPTIONS: PoolOptions = {json.dumps(pool_options)}\n"
+        )
+    return settings
+
+
 def generated_package(
     name: str,
     *,
@@ -115,14 +140,9 @@ def generated_package(
     (root / "schema.sql").write_text(
         textwrap.dedent(schema).lstrip("\n"), encoding="utf-8"
     )
-    settings = 'DSN = ""\n'
-    if pool_options is not None:
-        settings = (
-            "from iron_sql import PoolOptions\n\n"
-            + settings
-            + f"POOL_OPTIONS: PoolOptions = {json.dumps(pool_options)}\n"
-        )
-    (root / "settings.py").write_text(settings, encoding="utf-8")
+    (root / "settings.py").write_text(
+        generated_settings("", pool_options), encoding="utf-8"
+    )
     (root / "queries.py").write_text(
         textwrap.dedent(queries).lstrip("\n"), encoding="utf-8"
     )
@@ -140,98 +160,147 @@ def generated_package(
 # =============================================================================
 
 
-@pytest.fixture(scope="session")
-def pg_container() -> Iterator[PostgresContainer]:
-    with PostgresContainer("postgres:17-alpine") as postgres:
-        yield postgres
+@cache
+def process_pg_dsn() -> str:
+    postgres = PostgresContainer("postgres:17-alpine")
+    postgres.start()
+    dsn = postgres.get_connection_url(driver=None)
+    atexit.register(postgres.stop)
+    return dsn
 
 
 @pytest.fixture(scope="session")
-def pg_dsn(pg_container: PostgresContainer) -> str:
-    return pg_container.get_connection_url(driver=None)
+def pg_dsn() -> str:
+    return process_pg_dsn()
 
 
-@pytest.fixture(scope="session", autouse=True)
-def regenerate_generated_packages(pg_dsn: str) -> Iterator[None]:
-    database_name = "iron_sql_generated"
+@pytest.fixture(scope="session")
+def generated_packages_root(request: pytest.FixtureRequest) -> Iterator[Path]:
+    committed_root = Path(__file__).parent / "generated"
+    if request.config.getoption("--update-generated"):
+        yield committed_root
+        return
+    with tempfile.TemporaryDirectory(prefix="iron_sql_generated_") as tempdir:
+        generated_root = Path(tempdir)
+        shutil.copytree(committed_root, generated_root, dirs_exist_ok=True)
+        yield generated_root
+
+
+def assert_generated_package_committed(
+    package: GeneratedPackage,
+    package_root: Path,
+) -> None:
+    committed_files = {
+        path.name: path.read_bytes()
+        for path in package.root.iterdir()
+        if path.is_file()
+    }
+    generated_files = {
+        path.name: path.read_bytes()
+        for path in package_root.iterdir()
+        if path.is_file()
+    }
+    if generated_files != committed_files:
+        pytest.fail(f"Generated package {package.name!r} differs from committed files")
+
+
+def regenerate_generated_package(
+    package: GeneratedPackage,
+    package_root: Path,
+    generated_dsn: str,
+) -> None:
+    with (
+        psycopg.connect(generated_dsn, autocommit=True) as conn,
+        conn.cursor() as cur,
+    ):
+        cur.execute("DROP SCHEMA IF EXISTS public CASCADE")
+        cur.execute("CREATE SCHEMA public")
+        cur.execute("GRANT ALL ON SCHEMA public TO public")
+        schema = cast(
+            "LiteralString",
+            (package_root / "schema.sql").read_text(encoding="utf-8"),
+        )
+        cur.execute(schema)
+
+    package_module_name = f"tests.generated.{package.name}"
+    package_module = importlib.import_module(package_module_name)
+    importlib.reload(package_module)
+    settings_path = package_root / "settings.py"
+    settings_path.write_text(
+        generated_settings(generated_dsn, package.pool_options), encoding="utf-8"
+    )
+    importlib.invalidate_caches()
+    settings_module_name = f"{package_module_name}.settings"
+    settings_module = importlib.import_module(settings_module_name)
+    importlib.reload(settings_module)
+    generate_sql_module(
+        schema_path=Path("schema.sql"),
+        module_full_name="testdb",
+        dsn_expr=f"{settings_module_name}:DSN",
+        pool_options_expr=(
+            f"{settings_module_name}:POOL_OPTIONS"
+            if package.pool_options is not None
+            else None
+        ),
+        src_path=package_root,
+        tempdir_path=package_root,
+        type_overrides=package.type_overrides,
+        json_model_overrides=package.json_model_overrides,
+    )
+    settings_path.write_text(
+        generated_settings("", package.pool_options), encoding="utf-8"
+    )
+    importlib.invalidate_caches()
+    importlib.reload(settings_module)
+    assert_generated_package_committed(package, package_root)
+    module = importlib.import_module(f"{package_module_name}.testdb")
+    importlib.reload(module)
+    queries_module = importlib.import_module(f"{package_module_name}.queries")
+    importlib.reload(queries_module)
+    assert_generated_module_contract(module)
+
+
+def regenerate_generated_packages(
+    pg_dsn: str,
+    generated_packages_root: Path,
+) -> Iterator[None]:
+    database_name = f"iron_sql_generated_{uuid.uuid4().hex}"
     base_dsn = pg_dsn.rsplit("/", 1)[0]
     generated_dsn = f"{base_dsn}/{database_name}"
+    generated_namespace = cast(
+        "dict[str, object]",
+        vars(importlib.import_module("tests.generated")),
+    )
+    committed_search_locations = generated_namespace["__path__"]
     with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute(
-            sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
-                sql.Identifier(database_name)
-            )
-        )
         cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database_name)))
 
-    for package in _GENERATED_PACKAGES.values():
-        with (
-            psycopg.connect(generated_dsn, autocommit=True) as conn,
-            conn.cursor() as cur,
-        ):
-            cur.execute("DROP SCHEMA IF EXISTS public CASCADE")
-            cur.execute("CREATE SCHEMA public")
-            cur.execute("GRANT ALL ON SCHEMA public TO public")
-            schema = cast(
-                "LiteralString",
-                (package.root / "schema.sql").read_text(encoding="utf-8"),
-            )
-            cur.execute(schema)
-
-        settings_path = package.root / "settings.py"
-        settings = f"DSN = {generated_dsn!r}\n"
-        if package.pool_options is not None:
-            settings = (
-                "from iron_sql import PoolOptions\n\n"
-                + settings
-                + f"POOL_OPTIONS: PoolOptions = {json.dumps(package.pool_options)}\n"
-            )
-        settings_path.write_text(settings, encoding="utf-8")
-        importlib.invalidate_caches()
-        settings_module_name = f"tests.generated.{package.name}.settings"
-        settings_module = importlib.import_module(settings_module_name)
-        importlib.reload(settings_module)
-        generate_sql_module(
-            schema_path=Path("schema.sql"),
-            module_full_name="testdb",
-            dsn_expr=f"{settings_module_name}:DSN",
-            pool_options_expr=(
-                f"{settings_module_name}:POOL_OPTIONS"
-                if package.pool_options is not None
-                else None
-            ),
-            src_path=package.root,
-            tempdir_path=package.root,
-            type_overrides=package.type_overrides,
-            json_model_overrides=package.json_model_overrides,
-        )
-        committed_settings = 'DSN = ""\n'
-        if package.pool_options is not None:
-            committed_settings = (
-                "from iron_sql import PoolOptions\n\n"
-                + committed_settings
-                + f"POOL_OPTIONS: PoolOptions = {json.dumps(package.pool_options)}\n"
-            )
-        settings_path.write_text(committed_settings, encoding="utf-8")
-        importlib.invalidate_caches()
-        importlib.reload(settings_module)
-        module = importlib.import_module(f"tests.generated.{package.name}.testdb")
-        importlib.reload(module)
-        queries_module = importlib.import_module(
-            f"tests.generated.{package.name}.queries"
-        )
-        importlib.reload(queries_module)
-        assert_generated_module_contract(module)
-
     try:
+        generated_namespace["__path__"] = [str(generated_packages_root)]
+        importlib.invalidate_caches()
+        for package in _GENERATED_PACKAGES.values():
+            package_root = generated_packages_root / package.name
+            regenerate_generated_package(
+                package,
+                package_root,
+                generated_dsn,
+            )
+
         yield
     finally:
+        generated_namespace["__path__"] = committed_search_locations
+        importlib.invalidate_caches()
         with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
             cur.execute(
                 sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
                     sql.Identifier(database_name)
                 )
             )
+
+
+regenerate_generated_packages_fixture = pytest.fixture(scope="session", autouse=True)(
+    regenerate_generated_packages
+)
 
 
 type GeneratedTestDB = Callable[[str], contextlib.AbstractAsyncContextManager[None]]
@@ -249,37 +318,42 @@ def generated_test_db(pg_dsn: str) -> GeneratedTestDB:
                 sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database_name))
             )
 
-        package = _GENERATED_PACKAGES[package_name]
-        async with (
-            await psycopg.AsyncConnection.connect(test_dsn, autocommit=True) as conn,
-            conn.cursor() as cur,
-        ):
-            schema = cast(
-                "LiteralString",
-                (package.root / "schema.sql").read_text(encoding="utf-8"),
-            )
-            await cur.execute(schema)
-
-        module = importlib.import_module(f"tests.generated.{package_name}.testdb")
-        namespace = cast("dict[str, object]", vars(module))
-        pool_name = "TESTDB_POOL"
-        original_pool = namespace[pool_name]
-        if not isinstance(original_pool, ConnectionPool):
-            msg = f"{module.__name__}.{pool_name} is not a ConnectionPool"
-            raise TypeError(msg)
-        replacement_pool = ConnectionPool(
-            test_dsn,
-            name=original_pool.name,
-            application_name=original_pool.application_name,
-            pool_options=original_pool.pool_options,
-            enum_types=original_pool.enum_types,
-        )
-        namespace[pool_name] = replacement_pool
         try:
-            yield
+            package = _GENERATED_PACKAGES[package_name]
+            async with (
+                await psycopg.AsyncConnection.connect(
+                    test_dsn,
+                    autocommit=True,
+                ) as conn,
+                conn.cursor() as cur,
+            ):
+                schema = cast(
+                    "LiteralString",
+                    (package.root / "schema.sql").read_text(encoding="utf-8"),
+                )
+                await cur.execute(schema)
+
+            module = importlib.import_module(f"tests.generated.{package_name}.testdb")
+            namespace = cast("dict[str, object]", vars(module))
+            pool_name = "TESTDB_POOL"
+            original_pool = namespace[pool_name]
+            if not isinstance(original_pool, ConnectionPool):
+                msg = f"{module.__name__}.{pool_name} is not a ConnectionPool"
+                raise TypeError(msg)
+            replacement_pool = ConnectionPool(
+                test_dsn,
+                name=original_pool.name,
+                application_name=original_pool.application_name,
+                pool_options=original_pool.pool_options,
+                enum_types=original_pool.enum_types,
+            )
+            namespace[pool_name] = replacement_pool
+            try:
+                yield
+            finally:
+                await replacement_pool.close()
+                namespace[pool_name] = original_pool
         finally:
-            await replacement_pool.close()
-            namespace[pool_name] = original_pool
             with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
                 cur.execute(
                     sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
@@ -327,32 +401,40 @@ SCHEMA_SQL = """
 
 
 @pytest.fixture(scope="session")
-def schema_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    temp_dir = tmp_path_factory.mktemp("data")
-    path = temp_dir / "schema.sql"
-    path.write_text(SCHEMA_SQL, encoding="utf-8")
-    return path
+def schema_path() -> Iterator[Path]:
+    with tempfile.TemporaryDirectory(prefix="iron_sql_schema_") as tempdir:
+        path = Path(tempdir) / "schema.sql"
+        path.write_text(SCHEMA_SQL, encoding="utf-8")
+        yield path
 
 
 @pytest.fixture(scope="session")
-def pg_template_db(pg_dsn: str) -> str:
-    template_name = "iron_sql_template"
+def pg_template_db(pg_dsn: str) -> Iterator[str]:
+    template_name = f"iron_sql_template_{uuid.uuid4().hex}"
     with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute(
-            sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(template_name))
-        )
         cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(template_name)))
 
     base_dsn = pg_dsn.rsplit("/", 1)[0]
     template_dsn = f"{base_dsn}/{template_name}"
 
-    with psycopg.connect(template_dsn, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute("DROP SCHEMA IF EXISTS public CASCADE")
-        cur.execute("CREATE SCHEMA public")
-        cur.execute("GRANT ALL ON SCHEMA public TO public")
-        cur.execute(SCHEMA_SQL)
+    try:
+        with (
+            psycopg.connect(template_dsn, autocommit=True) as conn,
+            conn.cursor() as cur,
+        ):
+            cur.execute("DROP SCHEMA IF EXISTS public CASCADE")
+            cur.execute("CREATE SCHEMA public")
+            cur.execute("GRANT ALL ON SCHEMA public TO public")
+            cur.execute(SCHEMA_SQL)
 
-    return template_name
+        yield template_name
+    finally:
+        with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                    sql.Identifier(template_name)
+                )
+            )
 
 
 @pytest.fixture

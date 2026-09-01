@@ -9,6 +9,8 @@ from tests.conftest import GeneratedTestDB
 from tests.conftest import generated_package
 from tests.json_models import UserMetadata
 
+RESULT_MATRIX_PACKAGE = "result_matrix"
+
 
 @dataclass(kw_only=True, frozen=True)
 class ResultCell:
@@ -227,7 +229,7 @@ async def check(
 
 
 generated_package(
-    "result_matrix",
+    RESULT_MATRIX_PACKAGE,
     schema=result_matrix_schema(),
     queries=result_matrix_queries(),
     json_model_overrides={

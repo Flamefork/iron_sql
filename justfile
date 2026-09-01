@@ -26,6 +26,9 @@ mutants:
 fuzz-generated-names:
     uv run python -m tests.fuzz_generated_names
 
+generate-test-packages:
+    uv run pytest -q --update-generated
+
 generate-example:
     uv run python -m example.generate
 
