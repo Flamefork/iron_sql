@@ -65,6 +65,26 @@ class RepeatedQueryError(Exception):
     pass
 
 
+async def in_transaction(conn: psycopg.AsyncConnection[Any] | None) -> bool:
+    if conn is None:
+        return False
+    # A task sharing the connection may be mid-statement: ACTIVE then hides
+    # whether a transaction is open. The connection lock waits the statement out.
+    async with conn.lock:
+        status = conn.info.transaction_status
+    match status:
+        # INERROR is still an open transaction: only its ROLLBACK ends it.
+        case (
+            psycopg.pq.TransactionStatus.INTRANS | psycopg.pq.TransactionStatus.INERROR
+        ):
+            return True
+        case psycopg.pq.TransactionStatus.IDLE:
+            return False
+        case _:
+            msg = f"Cannot check transaction: connection is in {status.name} state"
+            raise psycopg.InterfaceError(msg)
+
+
 @asynccontextmanager
 async def listen(
     conn: psycopg.AsyncConnection[Any], channel: str

@@ -260,6 +260,23 @@ def test_module_implicit_annotations_binding_is_reserved(
     assert "queries.py:4" in message
 
 
+def test_transaction_state_helper_name_is_reserved(
+    test_project: ProjectBuilder,
+) -> None:
+    test_project.add_query(
+        "q", "SELECT id, username FROM users", row_type="testdb_is_in_transaction"
+    )
+
+    with pytest.raises(
+        ValueError, match=r"^Invalid generated Python names:"
+    ) as exc_info:
+        test_project.generate_no_import()
+
+    message = str(exc_info.value)
+    assert "'testdb_is_in_transaction' is claimed more than once" in message
+    assert "generated transaction state helper" in message
+
+
 def test_result_field_keyword_non_identifier_and_duplicate(
     test_project: ProjectBuilder,
 ) -> None:

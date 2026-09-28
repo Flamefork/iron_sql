@@ -65,6 +65,10 @@ async def testdb_transaction() -> AsyncGenerator[None]:
         yield
 
 
+async def testdb_is_in_transaction() -> builtins.bool:
+    return await runtime.in_transaction(_testdb_connection.get())
+
+
 @asynccontextmanager
 async def testdb_listen_session(
     channel: builtins.str,

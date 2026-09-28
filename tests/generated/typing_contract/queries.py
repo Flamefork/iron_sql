@@ -70,3 +70,5 @@ async def check(uid: uuid.UUID, metadata: UserMetadata) -> None:
         row_type="UserSummary",
     )
     assert_type(await explicit.query_single_row(), api.UserSummary)
+
+    assert_type(await api.testdb_is_in_transaction(), bool)

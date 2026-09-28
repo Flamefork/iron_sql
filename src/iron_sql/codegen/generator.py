@@ -1143,6 +1143,7 @@ def module_binding_claims(
             ),
             (f"{module_name}_connection", "generated connection helper"),
             (f"{module_name}_transaction", "generated transaction helper"),
+            (f"{module_name}_is_in_transaction", "generated transaction state helper"),
             (f"{module_name}_listen_session", "generated listen helper"),
             (f"{module_name}_notify", "generated notify helper"),
             ("Query", "generated query base class"),
@@ -1647,6 +1648,10 @@ async def {module_name}_connection() -> AsyncGenerator[psycopg.AsyncConnection]:
 async def {module_name}_transaction() -> AsyncGenerator[None]:
     async with {module_name}_connection() as conn, conn.transaction():
         yield
+
+
+async def {module_name}_is_in_transaction() -> builtins.bool:
+    return await runtime.in_transaction(_{module_name}_connection.get())
 
 
 @asynccontextmanager

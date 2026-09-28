@@ -69,6 +69,7 @@ A 1+N pattern is therefore never implicit: it is always a loop in your own code 
    This writes `myapp/db/mydb.py` containing:
    - a connection pool singleton,
    - `*_connection()` and `*_transaction()` context managers,
+   - `*_is_in_transaction()` check for an open transaction,
    - `*_listen_session(channel)` and `*_notify(channel, payload="")` helpers,
    - dataclasses for multi-column results (deduplicated by table),
    - `StrEnum` classes for PostgreSQL enums,
@@ -85,6 +86,7 @@ A 1+N pattern is therefore never implicit: it is always a loop in your own code 
 
 ## Runtime Highlights
 - `ConnectionPool` opens lazily and reopens after `close()`, with `ContextVar`-based connection reuse for nested contexts.
+- `*_is_in_transaction()` reports whether the context connection has an open transaction. It reads the transaction status of that connection, not the presence of a connection in the `ContextVar`, so a bare `*_connection()` gives `False`. When another task runs a statement on the same connection, the check waits for that statement to finish. `query_stream()` opens its own transaction for the read, so the check gives `True` while a stream is iterated.
 - `*_listen_session()` uses a dedicated pooled connection and doesn't reuse `ContextVar` transaction connections.
 - `query_single_row()` raises `NoRowsError`; `query_optional_row()` returns `None`. Both raise `TooManyRowsError` on 2+ rows.
 - `query_stream()` returns an async context manager yielding an `AsyncGenerator`; uses server-side cursors with automatic transaction management.

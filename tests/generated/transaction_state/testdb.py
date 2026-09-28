@@ -26,8 +26,7 @@ import psycopg.rows
 import psycopg.sql
 import psycopg.types.json
 from iron_sql import runtime
-from tests.generated.json_tag_list.settings import DSN
-import tests.json_models
+from tests.generated.transaction_state.settings import DSN
 
 
 TESTDB_POOL = runtime.ConnectionPool(
@@ -75,47 +74,58 @@ async def testdb_notify(
         await runtime.notify(conn, channel, payload)
 
 
-@dataclass(kw_only=True)
-@runtime.json_validated(tags=tests.json_models.TagList)
-class TestdbTaggedItem:
-    id: builtins.int
-    tags: tests.json_models.TagList
+
 
 
 class Query[T](runtime.Query[T]):
     _connection_factory = builtins.staticmethod(testdb_connection)
 
 
-class Query_d852890bc201296b0c52aff6cd79d342(Query[TestdbTaggedItem]):
+class Query_a49028b24740c7fad10c447f93714114(Query[None]):
     _locations = ('queries.py:3',)
 
-    _stmt = psycopg.sql.SQL('INSERT INTO tagged_items (tags) VALUES ($1) RETURNING id, tags')
+    _stmt = psycopg.sql.SQL("INSERT INTO users (id, username) VALUES ($1, 'streamed')")
 
-    _row_factory = builtins.staticmethod(psycopg.rows.class_row(TestdbTaggedItem))
+    _row_factory = builtins.staticmethod(psycopg.rows.scalar_row)
 
-    async def query_all_rows(self, tags: tests.json_models.TagList) -> builtins.list[TestdbTaggedItem]:
-        async with self._client_cursor((psycopg.types.json.Jsonb(runtime.dump_json_value(tests.json_models.TagList, tags)),)) as cur:
+    async def execute(self, id: uuid.UUID) -> None:
+        async with self._client_cursor((id,)):
+            pass
+
+
+class Query_422e67bba9cdcbd7e7e5db23d3183f4c(Query[uuid.UUID]):
+    _locations = ('queries.py:4',)
+
+    _stmt = psycopg.sql.SQL('SELECT id FROM users')
+
+    _row_factory = builtins.staticmethod(runtime.typed_scalar_row(uuid.UUID, not_null=True))
+
+    async def query_all_rows(self) -> builtins.list[uuid.UUID]:
+        async with self._client_cursor(None) as cur:
             return await cur.fetchall()
 
-    async def query_single_row(self, tags: tests.json_models.TagList) -> TestdbTaggedItem:
-        async with self._client_cursor((psycopg.types.json.Jsonb(runtime.dump_json_value(tests.json_models.TagList, tags)),)) as cur:
+    async def query_single_row(self) -> uuid.UUID:
+        async with self._client_cursor(None) as cur:
             return runtime.get_one_row(await cur.fetchmany(2))
 
-    async def query_optional_row(self, tags: tests.json_models.TagList) -> TestdbTaggedItem | None:
-        async with self._client_cursor((psycopg.types.json.Jsonb(runtime.dump_json_value(tests.json_models.TagList, tags)),)) as cur:
+    async def query_optional_row(self) -> uuid.UUID | None:
+        async with self._client_cursor(None) as cur:
             return runtime.get_one_row_or_none(await cur.fetchmany(2))
 
-    def query_stream(self, tags: tests.json_models.TagList) -> AbstractAsyncContextManager[AsyncIterator[TestdbTaggedItem]]:
-        return self._server_cursor((psycopg.types.json.Jsonb(runtime.dump_json_value(tests.json_models.TagList, tags)),))
+    def query_stream(self) -> AbstractAsyncContextManager[AsyncIterator[uuid.UUID]]:
+        return self._server_cursor(None)
 
 
 _QUERIES: builtins.dict[builtins.str, builtins.type[Query[Any]]] = {
-    'INSERT INTO tagged_items (tags) VALUES ($1) RETURNING id, tags': Query_d852890bc201296b0c52aff6cd79d342
+    "INSERT INTO users (id, username) VALUES ($1, 'streamed')": Query_a49028b24740c7fad10c447f93714114,
+    'SELECT id FROM users': Query_422e67bba9cdcbd7e7e5db23d3183f4c
 }
 
 
 @overload
-def testdb_sql(sql: Literal['INSERT INTO tagged_items (tags) VALUES ($1) RETURNING id, tags']) -> Query_d852890bc201296b0c52aff6cd79d342: ...
+def testdb_sql(sql: Literal["INSERT INTO users (id, username) VALUES ($1, 'streamed')"]) -> Query_a49028b24740c7fad10c447f93714114: ...
+@overload
+def testdb_sql(sql: Literal['SELECT id FROM users']) -> Query_422e67bba9cdcbd7e7e5db23d3183f4c: ...
 @overload
 def testdb_sql(sql: builtins.str) -> Query[Any]: ...
 
