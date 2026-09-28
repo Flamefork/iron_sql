@@ -64,7 +64,7 @@ class BasedPyrightReport(BaseModel):
     summary: DiagnosticSummary
 
 
-def basedpyright_report(*check_paths: Path) -> BasedPyrightReport:
+def basedpyright_report(*check_paths: Path, project_root: Path) -> BasedPyrightReport:
     completed = subprocess.run(
         [
             sys.executable,
@@ -78,7 +78,7 @@ def basedpyright_report(*check_paths: Path) -> BasedPyrightReport:
         capture_output=True,
         text=True,
         check=False,
-        cwd=Path(__file__).parent.parent,
+        cwd=project_root,
     )
     try:
         return TypeAdapter(BasedPyrightReport).validate_json(completed.stdout)

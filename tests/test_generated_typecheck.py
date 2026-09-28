@@ -270,7 +270,9 @@ def test_generated_typing_contract(tmp_path: Path) -> None:
         check_paths[name] = path
 
     package_roots = generated_package_roots()
-    report = basedpyright_report(*package_roots, tmp_path)
+    report = basedpyright_report(
+        *package_roots, tmp_path, project_root=Path(__file__).parent.parent
+    )
     generated_errors = [
         diagnostic
         for diagnostic in report.general_diagnostics
