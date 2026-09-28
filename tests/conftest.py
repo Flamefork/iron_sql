@@ -103,14 +103,6 @@ class GeneratedPackage:
 _GENERATED_PACKAGES: dict[str, GeneratedPackage] = {}
 
 
-def pytest_addoption(parser: pytest.Parser) -> None:
-    parser.addoption(
-        "--update-generated",
-        action="store_true",
-        help="Write generated test packages to tests/generated.",
-    )
-
-
 def generated_settings(
     dsn: str,
     pool_options: dict[str, object] | None,
@@ -140,19 +132,26 @@ def generated_package(
     (root / "schema.sql").write_text(
         textwrap.dedent(schema).lstrip("\n"), encoding="utf-8"
     )
-    (root / "settings.py").write_text(
-        generated_settings("", pool_options), encoding="utf-8"
-    )
     (root / "queries.py").write_text(
         textwrap.dedent(queries).lstrip("\n"), encoding="utf-8"
     )
-    _GENERATED_PACKAGES[name] = GeneratedPackage(
+    package = GeneratedPackage(
         name=name,
         root=root,
         type_overrides=type_overrides,
         json_model_overrides=json_model_overrides,
         pool_options=pool_options,
     )
+    _GENERATED_PACKAGES[name] = package
+    # Generated during collection: the declaring test module imports the package
+    # on its next line. mutmut forks reuse the parent's imported test modules, so
+    # generator mutants never reach these packages; generator behavior under
+    # mutation belongs in test_project-based tests.
+    generate_package(package)
+
+
+def generated_package_roots() -> list[Path]:
+    return [package.root for package in _GENERATED_PACKAGES.values()]
 
 
 # =============================================================================
@@ -174,133 +173,60 @@ def pg_dsn() -> str:
     return process_pg_dsn()
 
 
-@pytest.fixture(scope="session")
-def generated_packages_root(request: pytest.FixtureRequest) -> Iterator[Path]:
-    committed_root = Path(__file__).parent / "generated"
-    if request.config.getoption("--update-generated"):
-        yield committed_root
-        return
-    with tempfile.TemporaryDirectory(prefix="iron_sql_generated_") as tempdir:
-        generated_root = Path(tempdir)
-        shutil.copytree(committed_root, generated_root, dirs_exist_ok=True)
-        yield generated_root
-
-
-def assert_generated_package_committed(
-    package: GeneratedPackage,
-    package_root: Path,
-) -> None:
-    committed_files = {
-        path.name: path.read_bytes()
-        for path in package.root.iterdir()
-        if path.is_file()
-    }
-    generated_files = {
-        path.name: path.read_bytes()
-        for path in package_root.iterdir()
-        if path.is_file()
-    }
-    if generated_files != committed_files:
-        pytest.fail(f"Generated package {package.name!r} differs from committed files")
-
-
-def regenerate_generated_package(
-    package: GeneratedPackage,
-    package_root: Path,
-    generated_dsn: str,
-) -> None:
-    with (
-        psycopg.connect(generated_dsn, autocommit=True) as conn,
-        conn.cursor() as cur,
-    ):
-        cur.execute("DROP SCHEMA IF EXISTS public CASCADE")
-        cur.execute("CREATE SCHEMA public")
-        cur.execute("GRANT ALL ON SCHEMA public TO public")
-        schema = cast(
-            "LiteralString",
-            (package_root / "schema.sql").read_text(encoding="utf-8"),
-        )
-        cur.execute(schema)
-
-    package_module_name = f"tests.generated.{package.name}"
-    package_module = importlib.import_module(package_module_name)
-    importlib.reload(package_module)
-    settings_path = package_root / "settings.py"
-    settings_path.write_text(
-        generated_settings(generated_dsn, package.pool_options), encoding="utf-8"
-    )
-    importlib.invalidate_caches()
-    settings_module_name = f"{package_module_name}.settings"
-    settings_module = importlib.import_module(settings_module_name)
-    importlib.reload(settings_module)
-    generate_sql_module(
-        schema_path=Path("schema.sql"),
-        module_full_name="testdb",
-        dsn_expr=f"{settings_module_name}:DSN",
-        pool_options_expr=(
-            f"{settings_module_name}:POOL_OPTIONS"
-            if package.pool_options is not None
-            else None
-        ),
-        src_path=package_root,
-        tempdir_path=package_root,
-        type_overrides=package.type_overrides,
-        json_model_overrides=package.json_model_overrides,
-    )
-    settings_path.write_text(
-        generated_settings("", package.pool_options), encoding="utf-8"
-    )
-    importlib.invalidate_caches()
-    importlib.reload(settings_module)
-    assert_generated_package_committed(package, package_root)
-    module = importlib.import_module(f"{package_module_name}.testdb")
-    importlib.reload(module)
-    queries_module = importlib.import_module(f"{package_module_name}.queries")
-    importlib.reload(queries_module)
-    assert_generated_module_contract(module)
-
-
-def regenerate_generated_packages(
-    pg_dsn: str,
-    generated_packages_root: Path,
-) -> Iterator[None]:
+def generate_package(package: GeneratedPackage) -> None:
+    pg_dsn = process_pg_dsn()
     database_name = f"iron_sql_generated_{uuid.uuid4().hex}"
-    base_dsn = pg_dsn.rsplit("/", 1)[0]
-    generated_dsn = f"{base_dsn}/{database_name}"
-    generated_namespace = cast(
-        "dict[str, object]",
-        vars(importlib.import_module("tests.generated")),
-    )
-    committed_search_locations = generated_namespace["__path__"]
+    generated_dsn = f"{pg_dsn.rsplit('/', 1)[0]}/{database_name}"
     with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database_name)))
 
     try:
-        generated_namespace["__path__"] = [str(generated_packages_root)]
-        importlib.invalidate_caches()
-        for package in _GENERATED_PACKAGES.values():
-            package_root = generated_packages_root / package.name
-            regenerate_generated_package(
-                package,
-                package_root,
-                generated_dsn,
+        with (
+            psycopg.connect(generated_dsn, autocommit=True) as conn,
+            conn.cursor() as cur,
+        ):
+            schema = cast(
+                "LiteralString",
+                (package.root / "schema.sql").read_text(encoding="utf-8"),
             )
+            cur.execute(schema)
 
-        yield
-    finally:
-        generated_namespace["__path__"] = committed_search_locations
+        package_module_name = f"tests.generated.{package.name}"
+        settings_path = package.root / "settings.py"
+        settings_path.write_text(
+            generated_settings(generated_dsn, package.pool_options), encoding="utf-8"
+        )
         importlib.invalidate_caches()
+        settings_module_name = f"{package_module_name}.settings"
+        generate_sql_module(
+            schema_path=Path("schema.sql"),
+            module_full_name="testdb",
+            dsn_expr=f"{settings_module_name}:DSN",
+            pool_options_expr=(
+                f"{settings_module_name}:POOL_OPTIONS"
+                if package.pool_options is not None
+                else None
+            ),
+            src_path=package.root,
+            tempdir_path=package.root,
+            type_overrides=package.type_overrides,
+            json_model_overrides=package.json_model_overrides,
+        )
+        settings_path.write_text(
+            generated_settings("", package.pool_options), encoding="utf-8"
+        )
+        importlib.invalidate_caches()
+        importlib.reload(importlib.import_module(settings_module_name))
+        module = importlib.import_module(f"{package_module_name}.testdb")
+        importlib.import_module(f"{package_module_name}.queries")
+        assert_generated_module_contract(module)
+    finally:
         with psycopg.connect(pg_dsn, autocommit=True) as conn, conn.cursor() as cur:
             cur.execute(
                 sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
                     sql.Identifier(database_name)
                 )
             )
-
-
-regenerate_generated_packages_fixture = pytest.fixture(scope="session", autouse=True)(
-    regenerate_generated_packages
-)
 
 
 type GeneratedTestDB = Callable[[str], contextlib.AbstractAsyncContextManager[None]]

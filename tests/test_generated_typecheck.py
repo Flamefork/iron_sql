@@ -7,6 +7,7 @@ from tests.conftest import BasedPyrightReport
 from tests.conftest import Diagnostic
 from tests.conftest import basedpyright_report
 from tests.conftest import generated_package
+from tests.conftest import generated_package_roots
 
 generated_package(
     "typing_contract",
@@ -268,7 +269,8 @@ def test_generated_typing_contract(tmp_path: Path) -> None:
         path.write_text(textwrap.dedent(source).lstrip("\n"), encoding="utf-8")
         check_paths[name] = path
 
-    report = basedpyright_report(GENERATED, tmp_path)
+    package_roots = generated_package_roots()
+    report = basedpyright_report(*package_roots, tmp_path)
     generated_errors = [
         diagnostic
         for diagnostic in report.general_diagnostics
@@ -279,7 +281,7 @@ def test_generated_typing_contract(tmp_path: Path) -> None:
         f"{item.file}:{item.range.start.line + 1}: {item.message}"
         for item in generated_errors
     )
-    generated_files = len(list(GENERATED.glob("*/*.py")))
+    generated_files = sum(len(list(root.glob("*.py"))) for root in package_roots)
     assert report.summary.files_analyzed >= generated_files + len(check_paths)
 
     dynamic = diagnostics_for(report, check_paths["dynamic.py"])

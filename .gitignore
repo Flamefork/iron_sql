@@ -50,6 +50,8 @@ coverage.xml
 .hypothesis/
 .mutmut-cache
 mutants/
+tests/generated/*
+!tests/generated/__init__.py
 .pytest_cache/
 cover/
 

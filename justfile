@@ -2,7 +2,7 @@ format:
     uv run ruff format .
     uv run ruff check . --fix || true
 
-lint:
+lint: generate-test-packages
     uv run ruff format --check .
     uv run ruff check .
     uv run basedpyright
@@ -27,7 +27,8 @@ fuzz-generated-names:
     uv run python -m tests.fuzz_generated_names
 
 generate-test-packages:
-    uv run pytest -q --update-generated
+    git clean -fdX tests/generated
+    uv run pytest -qq --collect-only
 
 generate-example:
     uv run python -m example.generate
