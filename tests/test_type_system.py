@@ -548,16 +548,31 @@ async def test_pg_catalog_type_does_not_break_generation(
 def test_pg_catalog_does_not_trigger_warnings(
     test_project: ProjectBuilder,
 ) -> None:
-    test_project.add_query("get_user", "SELECT * FROM users")
+    test_project.add_query("list_tables", "SELECT tablename FROM pg_tables")
 
-    with warnings.catch_warnings(record=True) as warning_messages:
-        warnings.simplefilter("always", UnknownSQLTypeWarning)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnknownSQLTypeWarning)
         test_project.generate()
 
-    unknown_type_warnings = [
-        w for w in warning_messages if issubclass(w.category, UnknownSQLTypeWarning)
-    ]
-    assert not unknown_type_warnings
+
+async def test_unread_table_with_unknown_type_does_not_warn(
+    test_project: ProjectBuilder,
+) -> None:
+    extra_schema = """
+    CREATE TYPE unknown_composite AS (x integer);
+    CREATE TABLE unknown_table (
+        id SERIAL PRIMARY KEY,
+        val unknown_composite NOT NULL
+    );
+    """
+
+    await test_project.extend_schema(extra_schema)
+
+    test_project.add_query("get_user", "SELECT * FROM users")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnknownSQLTypeWarning)
+        test_project.generate()
 
 
 async def test_unknown_sql_type_warns_and_maps_to_object(

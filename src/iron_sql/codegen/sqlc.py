@@ -161,18 +161,19 @@ class SQLCResult(pydantic.BaseModel):
     catalog: Catalog
     queries: tuple[Query, ...]
 
-    def used_schemas(self) -> tuple[str, ...]:
-        result = {
-            c.table.schema_name
+    def used_tables(self) -> tuple[Table, ...]:
+        used = {
+            (c.table.schema_name or self.catalog.default_schema, c.table.name)
             for q in self.queries
             for c in q.columns
             if c.table is not None
         }
-        if "" in result:
-            result.remove("")
-            result.add(self.catalog.default_schema)
-        catalog_schema_names = {s.name for s in self.catalog.schemas}
-        return tuple(s for s in result if s in catalog_schema_names)
+        return tuple(
+            t
+            for s in self.catalog.schemas
+            for t in s.tables
+            if (s.name, t.rel.name) in used
+        )
 
 
 def run_sqlc(

@@ -30,6 +30,7 @@ from iron_sql.codegen.sqlc import Enum
 from iron_sql.codegen.sqlc import Query
 from iron_sql.codegen.sqlc import Schema
 from iron_sql.codegen.sqlc import SQLCResult
+from iron_sql.codegen.sqlc import Table
 from iron_sql.codegen.sqlc import run_sqlc
 from iron_sql.codegen.util import indent_block
 from iron_sql.codegen.util import write_if_changed
@@ -495,7 +496,7 @@ def generate_sql_module(  # noqa: PLR0913, PLR0914
 
     ordered_entities, query_result_types = build_entities(
         sqlc_res.queries,
-        sqlc_res.used_schemas(),
+        sqlc_res.used_tables(),
         queries,
         resolver,
     )
@@ -2146,7 +2147,7 @@ class SQLEntity:
 
 def build_entities(
     queries_from_sqlc: tuple[Query, ...],
-    used_schemas: tuple[str, ...],
+    used_tables: tuple[Table, ...],
     queries_from_code: list[CodeQuery],
     resolver: TypeResolver,
 ) -> tuple[list[SQLEntity], dict[str, str]]:
@@ -2159,8 +2160,7 @@ def build_entities(
             table_name=t.rel.name,
             columns=t.columns,
         )
-        for sch in used_schemas
-        for t in resolver.catalog.schema_by_name(sch).tables
+        for t in used_tables
     ]
     specs_to_entities = {e.column_specs: e for e in table_entities}
 
