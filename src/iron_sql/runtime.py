@@ -95,11 +95,7 @@ async def listen(
         raise RuntimeError(msg)
     await execute_listen(conn, channel)
 
-    async def _payloads() -> AsyncGenerator[str]:
-        async for notify_msg in conn.notifies():
-            yield notify_msg.payload
-
-    gen = _payloads()
+    gen = (notify_msg.payload async for notify_msg in conn.notifies())
     try:
         yield gen
     finally:
