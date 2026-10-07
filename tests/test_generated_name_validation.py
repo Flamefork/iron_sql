@@ -421,6 +421,17 @@ q = testdb_sql(
     assert target_path.read_text(encoding="utf-8") == original
 
 
+def test_parameter_name_keeps_dollar_sign(test_project: ProjectBuilder) -> None:
+    test_project.add_query("q", "UPDATE users SET username = @a$b")
+
+    with pytest.raises(
+        ValueError, match=r"^Invalid generated Python names:"
+    ) as exc_info:
+        test_project.generate_no_import()
+
+    assert "'a$b' is not a valid Python identifier" in str(exc_info.value)
+
+
 @pytest.mark.parametrize(
     "sql",
     [

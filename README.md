@@ -29,7 +29,7 @@ Every query is a static SQL literal at its call site. That one constraint is whe
 
 Non-goals, by construction:
 - **SQL fragment composition.** No shared `WHERE` snippets stitched together before execution.
-- **Dynamic query assembly.** Conditional filters belong in the SQL itself (`sqlc.narg('status')::task_status IS NULL OR status = @status?`), not in Python string building.
+- **Dynamic query assembly.** Conditional filters belong in the SQL itself (`@status?::task_status IS NULL OR status = @status?`), not in Python string building.
 - **Lazy relations and object graphs.** Nothing loads on attribute access; related rows come from a query you wrote.
 
 A 1+N pattern is therefore never implicit: it is always a loop in your own code around a statement you can read. [`detect_sql_repeats()`](#detecting-accidental-1n) reports one when you write it by accident.
@@ -50,7 +50,7 @@ A 1+N pattern is therefore never implicit: it is always a loop in your own code 
        "SELECT id, username, email, created_at FROM users WHERE id = @user_id"
    ).query_single_row(user_id=uid)
    ```
-   Named parameters use `@param` (required) or `@param?` (optional, expands to `sqlc.narg`). Positional `$1` works too.
+   Named parameters use `@param` (required) or `@param?` (optional) and become keyword-only arguments. Names are case-insensitive, and all uses of one name must agree on `?`. Put a space between a parameter and an operator next to it: PostgreSQL reads `id=@id` with the operator `=@` and `@n?-1` with the operator `?-`. Positional `$1` works too, but not in a query with named parameters. `sqlc.arg()` and `sqlc.narg()` are rejected.
 3. **Generate the client module.**
    ```python
    from pathlib import Path

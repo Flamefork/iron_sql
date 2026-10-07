@@ -27,10 +27,15 @@ from pydantic import alias_generators
 from iron_sql.codegen.sqlc import Catalog
 from iron_sql.codegen.sqlc import Column
 from iron_sql.codegen.sqlc import Enum
+from iron_sql.codegen.sqlc import NamedParam
 from iron_sql.codegen.sqlc import Query
 from iron_sql.codegen.sqlc import Schema
 from iron_sql.codegen.sqlc import SQLCResult
 from iron_sql.codegen.sqlc import Table
+from iron_sql.codegen.sqlc import has_handwritten_params
+from iron_sql.codegen.sqlc import has_positional_params
+from iron_sql.codegen.sqlc import named_params
+from iron_sql.codegen.sqlc import operator_hints
 from iron_sql.codegen.sqlc import run_sqlc
 from iron_sql.codegen.util import indent_block
 from iron_sql.codegen.util import write_if_changed
@@ -409,8 +414,14 @@ def map_sqlc_error(
     error: str,
     block_starts: list[tuple[int, str]],
     query_locations_by_name: dict[str, list[str]],
+    hints_by_name: dict[str, list[str]],
 ) -> str:
-    def replace(m: re.Match[str]) -> str:
+    mapped: list[str] = []
+    for error_line in error.splitlines():
+        m = re.search(r"queries\.sql:(\d+)(?::\d+)?:", error_line)
+        if m is None:
+            mapped.append(error_line)
+            continue
         line = int(m.group(1))
         name = next((n for start, n in reversed(block_starts) if start <= line), None)
         missing_block_msg = (
@@ -422,9 +433,41 @@ def map_sqlc_error(
         missing_locations_msg = f"SQLC query {name!r} has no source locations"
         if not locations:
             raise AssertionError(missing_locations_msg)
-        return f"{', '.join(locations)}:"
+        location_text = f"{', '.join(locations)}:"
+        mapped.append(
+            f"{error_line[: m.start()]}{location_text}{error_line[m.end() :]}"
+        )
+        mapped.extend(f"  {hint}" for hint in hints_by_name[name])
+    return "\n".join(mapped)
 
-    return re.sub(r"queries\.sql:(\d+)(?::\d+)?:", replace, error)
+
+def query_source_parameter_issues(
+    sql: str, params: tuple[NamedParam, ...], locations: list[str]
+) -> list[str]:
+    location_text = ", ".join(locations)
+    issues: list[str] = []
+    if has_handwritten_params(sql):
+        handwritten_msg = "sqlc.arg/narg/slice are not supported, use @name or @name?"
+        issues.append(f"{location_text}: {handwritten_msg}")
+    if params and has_positional_params(sql):
+        issues.append(f"{location_text}: $N cannot be mixed with @name")
+    nullability_by_name: defaultdict[str, set[bool]] = defaultdict(set)
+    for param in params:
+        nullability_by_name[param.name].add(param.nullable)
+    issues.extend(
+        f"{location_text}: parameter {name!r} is used both as @{name} and @{name}?"
+        for name, nullability in nullability_by_name.items()
+        if len(nullability) > 1
+    )
+    return issues
+
+
+def raise_query_parameter_issues(issues: list[str]) -> None:
+    if not issues:
+        return
+    details = "\n".join(f"- {issue}" for issue in issues)
+    msg = f"Invalid query parameters:\n{details}"
+    raise SQLGenerationError(msg)
 
 
 def generate_sql_module(  # noqa: PLR0913, PLR0914
@@ -462,6 +505,17 @@ def generate_sql_module(  # noqa: PLR0913, PLR0914
     if pool_options_ref is not None:
         pool_options_ref.evaluate(expected_type=dict)
 
+    named_params_by_name = {q.name: named_params(q.sql) for q in queries}
+    raise_query_parameter_issues([
+        issue
+        for q in queries
+        for issue in query_source_parameter_issues(
+            q.sql,
+            named_params_by_name[q.name],
+            query_locations_by_name[q.name],
+        )
+    ])
+
     sqlc_res, block_starts = run_sqlc(
         src_path / schema_path,
         [(q.name, q.sql) for q in queries],
@@ -471,7 +525,12 @@ def generate_sql_module(  # noqa: PLR0913, PLR0914
     )
 
     if sqlc_res.error:
-        mapped = map_sqlc_error(sqlc_res.error, block_starts, query_locations_by_name)
+        mapped = map_sqlc_error(
+            sqlc_res.error,
+            block_starts,
+            query_locations_by_name,
+            {q.name: operator_hints(q.sql) for q in queries},
+        )
         msg = f"Error running SQLC:\n{mapped}"
         raise SQLGenerationError(msg)
 
@@ -506,7 +565,7 @@ def generate_sql_module(  # noqa: PLR0913, PLR0914
             resolver.param_spec(
                 param.column,
                 param.column.name or f"param_{param.number}",
-                is_named=param.column.is_named_param,
+                is_named=bool(named_params_by_name[query.name]),
             )
             for param in query.params
         ])

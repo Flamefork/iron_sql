@@ -45,8 +45,8 @@ generated_package(
 
             assert_type(
                 await testdb_sql(
-                    "SELECT id FROM users WHERE id = $1 AND username = @username"
-                ).query_single_row(uid, username="name"),
+                    "SELECT id FROM users WHERE id = @id AND username = @username"
+                ).query_single_row(id=uid, username="name"),
                 uuid.UUID,
             )
 
@@ -237,7 +237,7 @@ CHECK_SOURCES = {
                 "INSERT INTO users (id, username, metadata) VALUES ($1, $2, $3)"
             ).execute("not-a-uuid", "name", None)
             await api.testdb_sql(
-                "SELECT id FROM users WHERE id = $1 AND username = @username"
+                "SELECT id FROM users WHERE id = @id AND username = @username"
             ).query_single_row(uid)
             await api.testdb_sql(
                 "SELECT id FROM users ORDER BY created_at"
@@ -307,7 +307,7 @@ def test_generated_typing_contract(tmp_path: Path) -> None:
     ]
     assert [(item.range.start.line, item.rule) for item in invalid] == [
         (8, "reportArgumentType"),
-        (9, "reportCallIssue"),
+        (11, "reportCallIssue"),
         (12, "reportUnknownMemberType"),
         (14, "reportAttributeAccessIssue"),
         (15, "reportUnknownMemberType"),

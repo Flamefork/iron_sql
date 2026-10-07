@@ -1,10 +1,12 @@
 import json
 import re
 import shutil
+import string
 import subprocess  # noqa: S404
 import tempfile
 import textwrap
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import pydantic
@@ -204,7 +206,9 @@ def run_sqlc(
         blocks: list[str] = []
         current_line = 1
         for name, sql in queries:
-            block = f"-- name: {name} :exec\n{preprocess_sql(sql)};"
+            # The semicolon goes on its own line: a query ending in a line comment
+            # would swallow it.
+            block = f"-- name: {name} :exec\n{preprocess_sql(sql)}\n;"
             block_starts.append((current_line, name))
             current_line += block.count("\n") + 2
             blocks.append(block)
@@ -258,6 +262,176 @@ def run_sqlc(
         ), block_starts
 
 
+# Character classes of the PostgreSQL lexer (src/backend/parser/scan.l). It works on
+# bytes and takes every byte of a multibyte character as a letter, so any non-ASCII
+# character counts. dolq_start is the same class as ident_start.
+_IDENT_START = r"A-Za-z_\x80-\U0010ffff"
+_IDENT_CONT = rf"{_IDENT_START}0-9$"
+_DOLQ_CONT = rf"{_IDENT_START}0-9"
+_SPACE = r" \t\n\r\f\v"
+
+# Left to sqlc, `@name` is PostgreSQL's prefix operator `@` applied to whatever the
+# grammar binds to it, and sqlc takes that whole operand as the parameter name:
+# `@x::text::int4` comes out as broken SQL and `@a::int4 + @b::int4` as one parameter
+# named "+aint4@bint4". A sqlc.arg() call has no such ambiguity.
+# PostgreSQL reads a run of operator characters as one operator, so `@` and `?` mark
+# a parameter only as operators of their own: `<@ARRAY[1]` and `@x?-1` hold the
+# operators `<@` and `?-`. An `@` right after an identifier character is part of a
+# name. The patterns see only the code span being searched: `/* c */@x` is a
+# parameter.
+_OPERATOR_CHARS = r"~!@#^&|`?+\-*/%<>="
+_NAMED_PARAM = re.compile(
+    rf"""
+    (?<![{_IDENT_CONT}{_OPERATOR_CHARS}])@
+    ([{_IDENT_START}][{_IDENT_CONT}]*)
+    (\?(?![{_OPERATOR_CHARS}]))?
+    """,
+    re.VERBOSE,
+)
+# Operators that took in the `@` before a name or the `?` after one. Valid SQL when
+# they are real operators, so they only explain a query that sqlc rejects.
+_OPERATOR_BEFORE_NAME = re.compile(
+    rf"(?<![{_OPERATOR_CHARS}])([{_OPERATOR_CHARS}]+@)([{_IDENT_START}][{_IDENT_CONT}]*)"
+)
+_OPERATOR_AFTER_NAME = re.compile(
+    rf"""
+    (?<![{_IDENT_CONT}{_OPERATOR_CHARS}])@
+    ([{_IDENT_START}][{_IDENT_CONT}]*)
+    (\?[{_OPERATOR_CHARS}]+)
+    """,
+    re.VERBOSE,
+)
+# Searched in code with unquoted names folded: the check catches accidental calls,
+# not ones split by a comment or spelled with quoted names.
+_HANDWRITTEN_PARAM = re.compile(
+    rf"(?<![{_IDENT_CONT}])sqlc[{_SPACE}]*\.[{_SPACE}]*(?:arg|narg|slice)[{_SPACE}]*\("
+)
+_POSITIONAL_PARAM = re.compile(rf"(?<![{_IDENT_CONT}])\$[0-9]")
+# PostgreSQL folds unquoted identifiers to lower case, ASCII letters only.
+_ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+# Text that is not query code: string literals, quoted identifiers, dollar-quoted
+# strings and comments. An unterminated one runs to the end, where sqlc rejects it.
+# An E prefix marks an escape string and `$` opens a dollar quote only when it
+# starts a token, not inside a name. A dollar quote tag cannot contain `$`, and
+# cannot start with a digit, which would be a positional parameter. A line comment
+# ends at CR as well as at LF. An E'...' string continued by a literal on the next
+# line is scanned as a standard string; a `\'` there ends it early and sqlc rejects
+# the query.
+_NON_CODE = re.compile(
+    rf"""
+    (?<![{_IDENT_CONT}])[eE]'(?:[^'\\]|''|\\.)*(?:'|\Z)
+    | '(?:[^']|'')*(?:'|\Z)
+    | "(?:[^"]|"")*(?:"|\Z)
+    | --[^\n\r]*
+    | (?<![{_IDENT_CONT}])\$(?:[{_IDENT_START}][{_DOLQ_CONT}]*)?\$
+    | /\*
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+
+
+def _skip_block_comment(sql: str, start: int) -> int:
+    # Block comments nest in PostgreSQL.
+    depth = 0
+    for match in re.finditer(r"/\*|\*/", sql[start:]):
+        depth += 1 if match[0] == "/*" else -1
+        if depth == 0:
+            return start + match.end()
+    return len(sql)
+
+
+def _code_spans(sql: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    code_start = pos = 0
+    while (match := _NON_CODE.search(sql, pos)) is not None:
+        spans.append((code_start, match.start()))
+        if match[0] == "/*":
+            end = _skip_block_comment(sql, match.start())
+        elif match[0].startswith("$"):
+            close = sql.find(match[0], match.end())
+            end = len(sql) if close < 0 else close + len(match[0])
+        else:
+            end = match.end()
+        code_start = pos = end
+    spans.append((code_start, len(sql)))
+    return spans
+
+
+@dataclass(kw_only=True, frozen=True)
+class NamedParam:
+    name: str
+    nullable: bool
+
+
+def _named_param(match: re.Match[str]) -> NamedParam:
+    return NamedParam(
+        name=match[1].translate(_ASCII_LOWER), nullable=match[2] is not None
+    )
+
+
+def _render_named_param(match: re.Match[str]) -> str:
+    param = _named_param(match)
+    fn = "narg" if param.nullable else "arg"
+    return f"sqlc.{fn}('{param.name}')"
+
+
+def named_params(sql: str) -> tuple[NamedParam, ...]:
+    return tuple(
+        _named_param(match)
+        for start, end in _code_spans(sql)
+        for match in _NAMED_PARAM.finditer(sql[start:end])
+    )
+
+
+def has_handwritten_params(sql: str) -> bool:
+    return any(
+        _HANDWRITTEN_PARAM.search(sql[start:end].translate(_ASCII_LOWER))
+        for start, end in _code_spans(sql)
+    )
+
+
+def has_positional_params(sql: str) -> bool:
+    return any(
+        _POSITIONAL_PARAM.search(sql[start:end]) for start, end in _code_spans(sql)
+    )
+
+
+def _operator_before_name_hint(match: re.Match[str]) -> str:
+    operator, name = match[1], match[2]
+    return (
+        f"PostgreSQL reads `{operator}` in `{operator}{name}` as one operator. "
+        f"If @{name} is a parameter, write `{operator[:-1]} @{name}`."
+    )
+
+
+def _operator_after_name_hint(match: re.Match[str]) -> str:
+    name, operator = match[1], match[2]
+    return (
+        f"PostgreSQL reads `{operator}` in `@{name}{operator}` as one operator. "
+        f"If `?` marks @{name} as optional, write `@{name}? {operator[1:]}`."
+    )
+
+
+def operator_hints(sql: str) -> list[str]:
+    hints: list[tuple[int, str]] = []
+    for start, end in _code_spans(sql):
+        code = sql[start:end]
+        hints.extend(
+            (start + match.start(), _operator_before_name_hint(match))
+            for match in _OPERATOR_BEFORE_NAME.finditer(code)
+        )
+        hints.extend(
+            (start + match.start(), _operator_after_name_hint(match))
+            for match in _OPERATOR_AFTER_NAME.finditer(code)
+        )
+    return list(dict.fromkeys(hint for _, hint in sorted(hints)))
+
+
 def preprocess_sql(sql: str) -> str:
-    sql = re.sub(r"@(\w+)\?", r"sqlc.narg('\1')", sql)
-    return textwrap.dedent(sql).strip()
+    parts: list[str] = []
+    pos = 0
+    for start, end in _code_spans(sql):
+        code = _NAMED_PARAM.sub(_render_named_param, sql[start:end])
+        parts.extend((sql[pos:start], code))
+        pos = end
+    return textwrap.dedent("".join(parts)).strip()

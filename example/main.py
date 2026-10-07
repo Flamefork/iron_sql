@@ -100,7 +100,7 @@ async def main() -> None:
         """
         SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at
         FROM tasks
-        WHERE project_id = @project_id AND (sqlc.narg('status')::task_status IS NULL OR status = @status?)
+        WHERE project_id = @project_id AND (@status?::task_status IS NULL OR status = @status?)
         """
     ).query_all_rows(
         project_id=project_id,
@@ -112,7 +112,7 @@ async def main() -> None:
         """
         SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at
         FROM tasks
-        WHERE project_id = @project_id AND (sqlc.narg('status')::task_status IS NULL OR status = @status?)
+        WHERE project_id = @project_id AND (@status?::task_status IS NULL OR status = @status?)
         """
     ).query_all_rows(
         project_id=project_id,
@@ -154,7 +154,7 @@ async def main() -> None:
         """
         SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at
         FROM tasks
-        WHERE project_id = @project_id AND (sqlc.narg('status')::task_status IS NULL OR status = @status?)
+        WHERE project_id = @project_id AND (@status?::task_status IS NULL OR status = @status?)
         """
     ).query_stream(
         project_id=project_id,

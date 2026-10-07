@@ -224,7 +224,7 @@ class Query_41cb2f3cea216a76ba87b6ddb70e6be5(Query[MydbUser]):
         return self._server_cursor((user_id,))
 
 
-class Query_ce9822661c2a7e0e716755087929ebd9(Query[MydbTask]):
+class Query_65f4a42ff09e715425bfa54a353b03fb(Query[MydbTask]):
     _locations = ('main.py:99', 'main.py:111', 'main.py:153')
 
     _stmt = psycopg.sql.SQL('SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\nFROM tasks\nWHERE project_id = $1 AND ($2::task_status IS NULL OR status = $2)')
@@ -323,7 +323,7 @@ _QUERIES: builtins.dict[builtins.str, builtins.type[Query[Any]]] = {
     'UPDATE tasks SET status = @status WHERE id = @task_id': Query_12e061f7aa94bf484295ab0018520059,
     'SELECT id, username, email, created_at FROM users ORDER BY created_at': Query_46242a02ffe365dc17851a034fdc1d30,
     'SELECT id, username, email, created_at FROM users WHERE id = @user_id': Query_41cb2f3cea216a76ba87b6ddb70e6be5,
-    "\n        SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\n        FROM tasks\n        WHERE project_id = @project_id AND (sqlc.narg('status')::task_status IS NULL OR status = @status?)\n        ": Query_ce9822661c2a7e0e716755087929ebd9,
+    '\n        SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\n        FROM tasks\n        WHERE project_id = @project_id AND (@status?::task_status IS NULL OR status = @status?)\n        ': Query_65f4a42ff09e715425bfa54a353b03fb,
     '\n        SELECT status, count(*) AS task_count\n        FROM tasks WHERE project_id = @project_id\n        GROUP BY status ORDER BY status\n        ': Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount,
     'SELECT id FROM tasks WHERE project_id = @project_id AND title = @title': Query_07cbb3e5226e35adbd17171f38ab7216,
     'SELECT count(*) FROM tasks WHERE status = @status': Query_29c838280e39383dd6b0760431eb3e60
@@ -343,7 +343,7 @@ def mydb_sql(sql: Literal['SELECT id, username, email, created_at FROM users ORD
 @overload
 def mydb_sql(sql: Literal['SELECT id, username, email, created_at FROM users WHERE id = @user_id']) -> Query_41cb2f3cea216a76ba87b6ddb70e6be5: ...
 @overload
-def mydb_sql(sql: Literal["\n        SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\n        FROM tasks\n        WHERE project_id = @project_id AND (sqlc.narg('status')::task_status IS NULL OR status = @status?)\n        "]) -> Query_ce9822661c2a7e0e716755087929ebd9: ...
+def mydb_sql(sql: Literal['\n        SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\n        FROM tasks\n        WHERE project_id = @project_id AND (@status?::task_status IS NULL OR status = @status?)\n        ']) -> Query_65f4a42ff09e715425bfa54a353b03fb: ...
 @overload
 def mydb_sql(sql: Literal['\n        SELECT status, count(*) AS task_count\n        FROM tasks WHERE project_id = @project_id\n        GROUP BY status ORDER BY status\n        '], row_type: Literal['TaskStatusCount']) -> Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount: ...
 @overload

@@ -186,6 +186,56 @@ def test_sqlc_failure_raises(test_project: ProjectBuilder) -> None:
         test_project.generate_no_import()
 
 
+@pytest.mark.parametrize(
+    ("sql", "message"),
+    [
+        (
+            "SELECT id FROM users WHERE username = @Name OR email = @name?",
+            "parameter 'name' is used both as @name and @name?",
+        ),
+        (
+            "SELECT id FROM users WHERE id = $1 AND username = @username",
+            "$N cannot be mixed with @name",
+        ),
+        (
+            "SELECT id FROM users WHERE username = @username OR username = $2",
+            "$N cannot be mixed with @name",
+        ),
+        (
+            "SELECT id FROM users WHERE username = sqlc.arg('username')",
+            "sqlc.arg/narg/slice are not supported, use @name or @name?",
+        ),
+    ],
+)
+def test_invalid_query_parameters_raise(
+    test_project: ProjectBuilder, sql: str, message: str
+) -> None:
+    test_project.add_query("q", sql)
+
+    with pytest.raises(SQLGenerationError) as exc_info:
+        test_project.generate_no_import()
+
+    assert str(exc_info.value).startswith("Invalid query parameters:\n")
+    assert f"queries.py:4: {message}" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT 1 /* @u and @u? /* */",
+        "SELECT $$ @u and @u?",
+        "SELECT ' @u and @u?",
+    ],
+)
+def test_unterminated_non_code_text_reaches_sqlc(
+    test_project: ProjectBuilder, sql: str
+) -> None:
+    test_project.add_query("q", sql)
+
+    with pytest.raises(SQLGenerationError, match=r"^Error running SQLC"):
+        test_project.generate_no_import()
+
+
 def test_sqlc_error_maps_to_source_location(
     test_project: ProjectBuilder,
 ) -> None:
@@ -206,6 +256,40 @@ q3 = testdb_sql("SELECT nonexistent_column FROM users")
     assert "queries.sql" not in message
     assert "queries.py:5" in message
     assert "queries.py:6" in message
+
+
+@pytest.mark.parametrize(
+    ("sql", "reads", "fix"),
+    [
+        (
+            "SELECT id FROM users WHERE username=@username",
+            "`=@` in `=@username`",
+            "If @username is a parameter, write `= @username`.",
+        ),
+        (
+            "SELECT to_tsvector('cat')@@@q::tsquery",
+            "`@@@` in `@@@q`",
+            "If @q is a parameter, write `@@ @q`.",
+        ),
+        (
+            "SELECT id FROM users LIMIT @n?-1",
+            "`?-` in `@n?-`",
+            "If `?` marks @n as optional, write `@n? -`.",
+        ),
+    ],
+)
+def test_operator_next_to_parameter_explains_sqlc_error(
+    test_project: ProjectBuilder, sql: str, reads: str, fix: str
+) -> None:
+    test_project.add_query("q", sql)
+
+    with pytest.raises(SQLGenerationError) as exc_info:
+        test_project.generate_no_import()
+
+    hint = f"PostgreSQL reads {reads} as one operator. {fix}"
+    assert re.search(
+        rf"queries\.py:4: [^\n]*\n  {re.escape(hint)}$", str(exc_info.value)
+    )
 
 
 def test_result_shapes_validation_error_zero_cols(test_project: ProjectBuilder) -> None:
