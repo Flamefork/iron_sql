@@ -1,9 +1,11 @@
+from iron_sql.codegen.generator import RenderedModule
 from iron_sql.codegen.generator import SQLGenerationError
 from iron_sql.codegen.generator import UnknownSQLTypeWarning
-from iron_sql.codegen.generator import generate_sql_module
+from iron_sql.codegen.generator import render_sql_module
 
 __all__ = [
+    "RenderedModule",
     "SQLGenerationError",
     "UnknownSQLTypeWarning",
-    "generate_sql_module",
+    "render_sql_module",
 ]

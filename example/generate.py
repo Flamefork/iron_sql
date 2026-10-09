@@ -6,7 +6,8 @@ from testcontainers.postgres import (  # pyright: ignore[reportMissingTypeStubs]
     PostgresContainer,
 )
 
-from iron_sql.codegen import generate_sql_module
+from iron_sql.codegen import RenderedModule
+from iron_sql.codegen import render_sql_module
 
 
 def init_db(dsn: str, schema_path: Path):
@@ -14,11 +15,11 @@ def init_db(dsn: str, schema_path: Path):
         conn.execute(schema_path.read_text(encoding="utf-8"))  # pyright: ignore[reportCallIssue, reportArgumentType]
 
 
-def generate_db_module(dsn: str, schema_path: Path, src_path: Path) -> bool:
+def render_db_module(dsn: str, schema_path: Path, src_path: Path) -> RenderedModule:
     # For example.config:DSN
     os.environ["DATABASE_URL"] = dsn
 
-    return generate_sql_module(
+    return render_sql_module(
         schema_path=schema_path,
         module_full_name="db.mydb",
         dsn_expr="example.config:DSN",
@@ -39,5 +40,4 @@ if __name__ == "__main__":
     with PostgresContainer("postgres:17-alpine") as postgres:
         dsn = postgres.get_connection_url(driver=None)
         init_db(dsn, src_path / schema_path)
-        changed = generate_db_module(dsn, schema_path, src_path)
-        print("Updated SQL module:", changed)
+        render_db_module(dsn, schema_path, src_path).write()

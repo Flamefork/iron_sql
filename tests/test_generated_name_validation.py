@@ -15,7 +15,7 @@ import pytest
 from pydantic import BaseModel
 from pydantic import alias_generators
 
-from iron_sql.codegen import generate_sql_module
+from iron_sql.codegen import render_sql_module
 from iron_sql.codegen.generator import ColumnSpec
 from iron_sql.codegen.generator import JSONModelRef
 from iron_sql.codegen.generator import ParamSpec
@@ -174,8 +174,7 @@ q4 = testdb_sql("SELECT username AS self, email AS runtime, id AS psycopg FROM u
 """
     )
 
-    changed, _ = test_project.generate_checked()
-    assert changed is True
+    test_project.generate()
 
 
 def test_json_module_root_cannot_be_shadowed_by_cursor_local(
@@ -236,8 +235,7 @@ async def test_scalar_json_module_named_like_old_lambda_parameter(
 def test_parameter_named_cur_remains_valid(test_project: ProjectBuilder) -> None:
     test_project.add_query("q", "SELECT id FROM users WHERE username = @cur")
 
-    changed, _ = test_project.generate_checked()
-    assert changed is True
+    test_project.generate()
 
 
 def test_module_implicit_annotations_binding_is_reserved(
@@ -397,8 +395,7 @@ def test_name_error_does_not_update_existing_target(
     test_project: ProjectBuilder,
 ) -> None:
     test_project.add_query("q", "SELECT id FROM users")
-    changed, _ = test_project.generate_checked()
-    assert changed is True
+    test_project.generate()
     target_path = (
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
     )
@@ -538,8 +535,7 @@ def test_generated_class_binding_name_envelope(
         return alias_generators.to_pascal(value)
 
     if accepted:
-        changed, _ = test_project.generate_checked(to_pascal_fn=custom_to_pascal)
-        assert changed is True
+        test_project.generate(to_pascal_fn=custom_to_pascal)
         return
     with pytest.raises(ValueError, match=r"^Invalid generated Python names:"):
         test_project.generate_no_import(to_pascal_fn=custom_to_pascal)
@@ -600,8 +596,7 @@ def test_non_mangled_dunder_parameter_is_allowed(
 ) -> None:
     test_project.add_query("q", "UPDATE users SET username = @__value__")
 
-    changed, _ = test_project.generate_checked()
-    assert changed is True
+    test_project.generate()
 
 
 @pytest.mark.parametrize(
@@ -648,8 +643,7 @@ def test_module_expression_validates_every_module_component(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     test_project.add_query("q", "SELECT 1")
-    changed, _ = test_project.generate_checked()
-    assert changed is True
+    test_project.generate()
     target_path = (
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
     )
@@ -669,14 +663,14 @@ def test_module_expression_validates_every_module_component(
         "bad-model:POOL_OPTIONS" if expression_kind == "pool_options" else None
     )
     with pytest.raises(ValueError, match="'bad-model'"):
-        generate_sql_module(
+        render_sql_module(
             schema_path=Path("schema.sql"),
             module_full_name=test_project.module_full_name,
             dsn_expr=dsn_expr,
             pool_options_expr=pool_options_expr,
             src_path=test_project.src_path,
             tempdir_path=test_project.src_path,
-        )
+        ).write()
 
     assert target_path.read_text(encoding="utf-8") == original
 
@@ -727,8 +721,7 @@ def test_output_module_validates_every_dotted_path_component(
     test_project: ProjectBuilder,
 ) -> None:
     test_project.add_query("q", "SELECT 1")
-    changed, _ = test_project.generate_checked()
-    assert changed is True
+    test_project.generate()
     (test_project.app_dir / "queries.py").write_text(
         """from typing import Any
 def class_sql(q: str, **kwargs: Any) -> Any: ...
@@ -743,13 +736,13 @@ q = class_sql("SELECT 1")
     with pytest.raises(
         ValueError, match=r"^Invalid generated Python names:"
     ) as exc_info:
-        generate_sql_module(
+        render_sql_module(
             schema_path=Path("schema.sql"),
             module_full_name=invalid_module_name,
             dsn_expr=f"{test_project.app_pkg}.config:DSN",
             src_path=test_project.src_path,
             tempdir_path=test_project.src_path,
-        )
+        ).write()
 
     message = str(exc_info.value)
     assert "output module path component 2: 'class' is a Python keyword" in message
@@ -767,8 +760,7 @@ def test_renderer_owned_builtin_reads_are_qualified(
         1.0::float8 AS ratio, decode('', 'hex') AS payload
         FROM users""",
     )
-    changed, _ = test_project.generate_checked()
-    assert changed is True
+    test_project.generate()
     target_path = (
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
     )
@@ -886,16 +878,14 @@ def choose(factory: object) -> str:
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
 
-    changed = generate_sql_module(
+    render_sql_module(
         schema_path=Path("schema.sql"),
         module_full_name=test_project.module_full_name,
         dsn_expr=f"{test_project.app_pkg}.config:choose(lambda: DSN)",
         src_path=test_project.src_path,
         tempdir_path=test_project.src_path,
-    )
+    ).write()
     test_project.import_generated()
-
-    assert changed is True
 
 
 @pytest.mark.parametrize(
@@ -964,13 +954,13 @@ def test_module_expression_walrus_binding_conflict_is_rejected_before_write(
     )
 
     with pytest.raises(ValueError, match="TESTDB_POOL"):
-        generate_sql_module(
+        render_sql_module(
             schema_path=Path("schema.sql"),
             module_full_name=test_project.module_full_name,
             dsn_expr=(f"{test_project.app_pkg}.config:(TESTDB_POOL := DSN)"),
             src_path=test_project.src_path,
             tempdir_path=test_project.src_path,
-        )
+        ).write()
 
     assert not target_path.exists()
 
@@ -1025,20 +1015,18 @@ def f(values):
     dsn_expression = "c(lambda: a(lambda Query: Query, f([runtime for runtime in D])))"
     pool_expression = "c(lambda: a(lambda Query: Query, f([psycopg for psycopg in P])))"
 
-    changed = generate_sql_module(
+    render_sql_module(
         schema_path=Path("schema.sql"),
         module_full_name=test_project.module_full_name,
         dsn_expr=f"{test_project.app_pkg}.config:{dsn_expression}",
         pool_options_expr=f"{test_project.app_pkg}.config:{pool_expression}",
         src_path=test_project.src_path,
         tempdir_path=test_project.src_path,
-    )
+    ).write()
     test_project.import_generated()
     generated = (
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
     ).read_text(encoding="utf-8")
-
-    assert changed is True
     assert dsn_expression in generated
     assert pool_expression in generated
     assert f"from {test_project.app_pkg}.config import Query" not in generated
@@ -1058,16 +1046,14 @@ def test_safe_module_expression_walrus_binding_is_emitted(
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
 
-    changed = generate_sql_module(
+    render_sql_module(
         schema_path=Path("schema.sql"),
         module_full_name=test_project.module_full_name,
         dsn_expr=f"{test_project.app_pkg}.config:(selected_dsn := DSN)",
         src_path=test_project.src_path,
         tempdir_path=test_project.src_path,
-    )
+    ).write()
     module = test_project.import_generated()
-
-    assert changed is True
     assert vars(module)["selected_dsn"] == test_project.dsn
 
 
@@ -1083,17 +1069,15 @@ def test_private_dunder_module_expression_read_and_binding_are_emitted(
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
 
-    changed = generate_sql_module(
+    render_sql_module(
         schema_path=Path("schema.sql"),
         module_full_name=test_project.module_full_name,
         dsn_expr=f"{test_project.app_pkg}.config:(__selected_dsn := DSN)",
         pool_options_expr=f"{test_project.app_pkg}.config:__pool_options",
         src_path=test_project.src_path,
         tempdir_path=test_project.src_path,
-    )
+    ).write()
     module = test_project.import_generated()
-
-    assert changed is True
     assert vars(module)["__selected_dsn"] == test_project.dsn
 
 
@@ -1110,7 +1094,7 @@ def test_module_expression_binding_conflicts_with_second_expression(
         sys.path.insert(0, str(test_project.src_path))
 
     with pytest.raises(ValueError, match="selected"):
-        generate_sql_module(
+        render_sql_module(
             schema_path=Path("schema.sql"),
             module_full_name=test_project.module_full_name,
             dsn_expr=f"{test_project.app_pkg}.config:(selected := DSN)",
@@ -1119,7 +1103,7 @@ def test_module_expression_binding_conflicts_with_second_expression(
             ),
             src_path=test_project.src_path,
             tempdir_path=test_project.src_path,
-        )
+        ).write()
 
 
 def test_module_expression_binding_reports_original_nfkc_spelling(
@@ -1135,13 +1119,13 @@ def test_module_expression_binding_reports_original_nfkc_spelling(
         sys.path.insert(0, str(test_project.src_path))
 
     with pytest.raises(ValueError, match="'K' is normalized by Python to 'K'"):
-        generate_sql_module(
+        render_sql_module(
             schema_path=Path("schema.sql"),
             module_full_name=test_project.module_full_name,
             dsn_expr=f"{test_project.app_pkg}.config:(K := DSN)",
             src_path=test_project.src_path,
             tempdir_path=test_project.src_path,
-        )
+        ).write()
 
 
 def test_module_expression_read_reports_original_nfkc_spelling(
@@ -1157,10 +1141,10 @@ def test_module_expression_read_reports_original_nfkc_spelling(
         sys.path.insert(0, str(test_project.src_path))
 
     with pytest.raises(ValueError, match="'K' is normalized by Python to 'K'"):
-        generate_sql_module(
+        render_sql_module(
             schema_path=Path("schema.sql"),
             module_full_name=test_project.module_full_name,
             dsn_expr=f"{test_project.app_pkg}.config:K",
             src_path=test_project.src_path,
             tempdir_path=test_project.src_path,
-        )
+        ).write()

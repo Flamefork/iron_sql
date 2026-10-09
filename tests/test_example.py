@@ -22,12 +22,12 @@ def test_full_example(pg_test_dsn: str) -> None:
             """\
 import os
 from pathlib import Path
-from example.generate import generate_db_module, init_db
+from example.generate import init_db, render_db_module
 dsn = os.environ["DATABASE_URL"]
 src_path = Path("example")
 schema_path = Path("schema.sql")
 init_db(dsn, src_path / schema_path)
-print(generate_db_module(dsn, schema_path, src_path))
+print(render_db_module(dsn, schema_path, src_path).diff(), end="")
 """,
         ],
         cwd=project_root,
@@ -37,7 +37,7 @@ print(generate_db_module(dsn, schema_path, src_path))
         check=False,
     )
     assert generation.returncode == 0, generation.stderr
-    assert generation.stdout == "False\n"
+    assert generation.stdout == ""
 
     completed = subprocess.run(
         [sys.executable, "-m", "example.main"],

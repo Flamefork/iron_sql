@@ -390,13 +390,12 @@ class Payload(BaseModel):
 
     module_a = f"{test_project.app_pkg}.json_models_a"
     module_b = f"{test_project.app_pkg}.json_models_b"
-    changed, _ = test_project.generate_checked(
+    test_project.generate(
         json_model_overrides={
             "users.metadata": f"{module_a}:Payload",
             "json_payloads.payload": f"{module_b}:Payload",
         },
     )
-    assert changed is True
 
     generated_path = (
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
@@ -422,7 +421,7 @@ FROM users CROSS JOIN json_payloads WHERE users.id = $1""",
         "json_payloads.payload": "tests.json_models:TagList",
     }
 
-    first_changed, _ = test_project.generate_checked(json_model_overrides=overrides)
+    test_project.generate(json_model_overrides=overrides)
     generated_path = (
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
     )
@@ -432,10 +431,8 @@ FROM users CROSS JOIN json_payloads WHERE users.id = $1""",
     assert b"tests.json_models.TagList" in first_source
     assert b"_iron_sql_json" not in first_source
 
-    second_changed, _ = test_project.generate_checked(
+    rendered = test_project.render(
         json_model_overrides=dict(reversed(overrides.items())),
     )
 
-    assert first_changed is True
-    assert second_changed is False
-    assert generated_path.read_bytes() == first_source
+    assert rendered.diff() == ""

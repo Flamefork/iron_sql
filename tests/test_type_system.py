@@ -1001,8 +1001,7 @@ def test_type_overrides_qualify_builtin_names(
 ) -> None:
     test_project.add_query("q", "SELECT 1::int4 AS value")
 
-    changed, _ = test_project.generate_checked(type_overrides={"int4": "int"})
-    assert changed is True
+    test_project.generate(type_overrides={"int4": "int"})
     generated = (
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
     ).read_text(encoding="utf-8")

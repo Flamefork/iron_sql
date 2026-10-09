@@ -32,7 +32,8 @@ from testcontainers.postgres import (  # pyright: ignore[reportMissingTypeStubs]
     PostgresContainer,
 )
 
-from iron_sql.codegen import generate_sql_module
+from iron_sql.codegen import RenderedModule
+from iron_sql.codegen import render_sql_module
 from iron_sql.runtime import ConnectionPool
 from tests.generated_oracles import assert_generated_module_contract
 
@@ -198,7 +199,7 @@ def generate_package(package: GeneratedPackage) -> None:
         )
         importlib.invalidate_caches()
         settings_module_name = f"{package_module_name}.settings"
-        generate_sql_module(
+        render_sql_module(
             schema_path=Path("schema.sql"),
             module_full_name="testdb",
             dsn_expr=f"{settings_module_name}:DSN",
@@ -211,7 +212,7 @@ def generate_package(package: GeneratedPackage) -> None:
             tempdir_path=package.root,
             type_overrides=package.type_overrides,
             json_model_overrides=package.json_model_overrides,
-        )
+        ).write()
         settings_path.write_text(
             generated_settings("", package.pool_options), encoding="utf-8"
         )
@@ -463,7 +464,7 @@ class ProjectBuilder:
                 lines.append(f"testdb_sql({call_args})")
         (self.app_dir / "queries.py").write_text("\n".join(lines), encoding="utf-8")
 
-    def generate_no_import(
+    def render(
         self,
         *,
         type_overrides: dict[str, str] | None = None,
@@ -471,7 +472,7 @@ class ProjectBuilder:
         pool_options: dict[str, Any] | None = None,
         to_pascal_fn: Callable[[str], str] = alias_generators.to_pascal,
         debug_path: Path | None = None,
-    ) -> bool:
+    ) -> RenderedModule:
         config_lines = [f'DSN = "{self.dsn}"']
         if pool_options is not None:
             config_lines.append(f"POOL_OPTIONS = {pool_options!r}")
@@ -484,7 +485,7 @@ class ProjectBuilder:
         if str(self.src_path) not in sys.path:
             sys.path.insert(0, str(self.src_path))
 
-        changed = generate_sql_module(
+        return render_sql_module(
             schema_path=Path("schema.sql"),
             module_full_name=self.module_full_name,
             dsn_expr=f"{self.app_pkg}.config:DSN",
@@ -500,29 +501,8 @@ class ProjectBuilder:
             to_pascal_fn=to_pascal_fn,
             debug_path=debug_path,
         )
-        target_path = self.src_path / f"{self.module_full_name.replace('.', '/')}.py"
-        if target_path.exists():
-            source = target_path.read_text(encoding="utf-8")
-            compile(source, target_path.as_posix(), "exec")
-        return changed
 
-    def generate(
-        self,
-        *,
-        type_overrides: dict[str, str] | None = None,
-        json_model_overrides: dict[str, str] | None = None,
-        pool_options: dict[str, Any] | None = None,
-        debug_path: Path | None = None,
-    ) -> ModuleType:
-        _, module = self.generate_checked(
-            type_overrides=type_overrides,
-            json_model_overrides=json_model_overrides,
-            pool_options=pool_options,
-            debug_path=debug_path,
-        )
-        return module
-
-    def generate_checked(
+    def generate_no_import(
         self,
         *,
         type_overrides: dict[str, str] | None = None,
@@ -530,8 +510,29 @@ class ProjectBuilder:
         pool_options: dict[str, Any] | None = None,
         to_pascal_fn: Callable[[str], str] = alias_generators.to_pascal,
         debug_path: Path | None = None,
-    ) -> tuple[bool, ModuleType]:
-        changed = self.generate_no_import(
+    ) -> None:
+        rendered = self.render(
+            type_overrides=type_overrides,
+            json_model_overrides=json_model_overrides,
+            pool_options=pool_options,
+            to_pascal_fn=to_pascal_fn,
+            debug_path=debug_path,
+        )
+        rendered.write()
+        if rendered.path.exists():
+            source = rendered.path.read_text(encoding="utf-8")
+            compile(source, rendered.path.as_posix(), "exec")
+
+    def generate(
+        self,
+        *,
+        type_overrides: dict[str, str] | None = None,
+        json_model_overrides: dict[str, str] | None = None,
+        pool_options: dict[str, Any] | None = None,
+        to_pascal_fn: Callable[[str], str] = alias_generators.to_pascal,
+        debug_path: Path | None = None,
+    ) -> ModuleType:
+        self.generate_no_import(
             type_overrides=type_overrides,
             json_model_overrides=json_model_overrides,
             pool_options=pool_options,
@@ -539,7 +540,7 @@ class ProjectBuilder:
             debug_path=debug_path,
         )
 
-        return changed, self.import_generated()
+        return self.import_generated()
 
     def import_generated(self) -> ModuleType:
         importlib.invalidate_caches()

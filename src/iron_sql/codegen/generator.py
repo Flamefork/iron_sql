@@ -1,12 +1,12 @@
 import ast
 import builtins
 import dataclasses
+import difflib
 import hashlib
 import importlib
 import io
 import json
 import keyword
-import logging
 import re
 import symtable
 import tokenize
@@ -38,9 +38,6 @@ from iron_sql.codegen.sqlc import named_params
 from iron_sql.codegen.sqlc import operator_hints
 from iron_sql.codegen.sqlc import run_sqlc
 from iron_sql.codegen.util import indent_block
-from iron_sql.codegen.util import write_if_changed
-
-logger = logging.getLogger(__name__)
 
 _DEFAULT_SRC_PATH = Path()
 
@@ -470,7 +467,53 @@ def raise_query_parameter_issues(issues: list[str]) -> None:
     raise SQLGenerationError(msg)
 
 
-def generate_sql_module(  # noqa: PLR0913, PLR0914
+@dataclass(frozen=True)
+class RenderedModule:
+    path: Path
+    text: str = dataclasses.field(repr=False)
+
+    def write(self) -> None:
+        if self._disk_text() == self.text:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(self.text, encoding="utf-8", newline="")
+
+    def diff(self) -> str:
+        disk_text = self._disk_text()
+        if disk_text == self.text:
+            return ""
+        if disk_text is None and not self.text:
+            # Neither side has a line to compare, yet write() creates the file.
+            return f"--- /dev/null\n+++ {self.path}\n"
+        lines = difflib.unified_diff(
+            [] if disk_text is None else _diff_lines(disk_text),
+            _diff_lines(self.text),
+            fromfile="/dev/null" if disk_text is None else str(self.path),
+            tofile=str(self.path),
+        )
+        # unified_diff emits a last line without its newline as is, so the next
+        # diff line is glued to it and the difference is invisible.
+        return "".join(
+            line if line.endswith("\n") else f"{line}\n\\ No newline at end of file\n"
+            for line in lines
+        )
+
+    def _disk_text(self) -> str | None:
+        # newline="" keeps CRLF as written: read_text would translate it and
+        # report a CRLF file as current.
+        try:
+            return self.path.read_text(encoding="utf-8", newline="")
+        except FileNotFoundError:
+            return None
+
+
+def _diff_lines(text: str) -> list[str]:
+    # str.splitlines also breaks at \r, \x0c, \u2028 and the like, which can stand
+    # inside an SQL literal; only \n ends a line of the written file.
+    return re.findall(r"[^\n]*\n|[^\n]+\Z", text)
+
+
+def render_sql_module(  # noqa: PLR0913, PLR0914
     *,
     schema_path: Path,
     module_full_name: str,
@@ -484,7 +527,7 @@ def generate_sql_module(  # noqa: PLR0913, PLR0914
     debug_path: Path | None = None,
     src_path: Path = _DEFAULT_SRC_PATH,
     tempdir_path: Path | None = None,
-) -> bool:
+) -> RenderedModule:
     module_name = module_full_name.rsplit(".", maxsplit=1)[-1]
     sql_fn_name = f"{module_name}_sql"
 
@@ -668,10 +711,7 @@ def generate_sql_module(  # noqa: PLR0913, PLR0914
         application_name,
     )
     compile(new_content, target_module_path.as_posix(), "exec")
-    changed = write_if_changed(target_module_path, new_content + "\n")
-    if changed:
-        logger.info(f"Generated SQL module {module_full_name}")
-    return changed
+    return RenderedModule(target_module_path, new_content + "\n")
 
 
 def collect_queries(src_path: Path, sql_fn_name: str) -> "DiscoveredQueries":

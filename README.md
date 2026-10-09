@@ -5,7 +5,7 @@
 [![PyPI - Version](https://img.shields.io/pypi/v/iron-sql)](https://pypi.org/project/iron-sql/)
 
 
-`iron_sql` is a typed SQL code generator and async runtime for PostgreSQL. Write SQL where you use it, run `generate_sql_module`, and get a module with typed dataclasses, query helpers, and pooled connections without hand-written boilerplate.
+`iron_sql` is a typed SQL code generator and async runtime for PostgreSQL. Write SQL where you use it, run `render_sql_module(...).write()`, and get a module with typed dataclasses, query helpers, and pooled connections without hand-written boilerplate.
 
 ## Installation
 
@@ -17,7 +17,7 @@ pip install iron-sql[codegen]    # + inflection for code generation
 The `sqlc` binary is bundled automatically via the `sqlc` Python package.
 
 ## Key Features
-- **Query discovery.** `generate_sql_module` scans your codebase for calls like `<module>_sql("SELECT ...")`, runs `sqlc` for type analysis, and emits a typed module.
+- **Query discovery.** `render_sql_module` scans your codebase for calls like `<module>_sql("SELECT ...")`, runs `sqlc` for type analysis, and emits a typed module.
 - **Strong typing.** Generated dataclasses and method signatures flow through your IDE and type checker.
 - **Async runtime.** Built on `psycopg` v3 with pooled connections, context-based connection reuse, and transaction helpers.
 - **Streaming.** `query_stream()` uses server-side cursors for memory-efficient iteration over large result sets.
@@ -38,7 +38,7 @@ A 1+N pattern is therefore never implicit: it is always a loop in your own code 
 - `runtime.py` -- async `ConnectionPool`, row helpers (`get_one_row`, `typed_scalar_row`), JSON validation decorators.
 - `codegen/generator.py` -- query discovery, type resolution, module rendering.
 - `codegen/sqlc.py` -- wraps the `sqlc` CLI and models its JSON output.
-- `codegen/util.py` -- shared codegen utilities (`indent_block`, `write_if_changed`).
+- `codegen/util.py` -- shared codegen utilities (`indent_block`).
 
 ## Getting Started
 1. **Add a schema file.** A Postgres DDL dump, e.g. `db/schema.sql`.
@@ -55,14 +55,14 @@ A 1+N pattern is therefore never implicit: it is always a loop in your own code 
    ```python
    from pathlib import Path
 
-   from iron_sql.codegen import generate_sql_module
+   from iron_sql.codegen import render_sql_module
 
-   generate_sql_module(
+   render_sql_module(
        schema_path=Path("schema.sql"),
        module_full_name="myapp.db.mydb",
        dsn_expr="myapp.config:DSN",
        src_path=Path("."),
-   )
+   ).write()
    ```
    `src_path` is the root of the source scan. The scan does not enter dot-prefixed directories, virtual environments that contain `pyvenv.cfg`, or directory symlinks. These rules apply only to child directories, so `src_path` can have any name. All other directories are scanned, including directories without importable Python names.
 
@@ -75,6 +75,8 @@ A 1+N pattern is therefore never implicit: it is always a loop in your own code 
    - `StrEnum` classes for PostgreSQL enums,
    - a query class per statement with typed methods,
    - overloads for the `*_sql()` helper so editors infer return types.
+
+   To check that a committed module is current without writing it, call `diff()` instead of `write()`. It returns a unified diff from the file to the rendered module, or an empty string if the file is current.
 
 ## Customization
 - **Type overrides.** `type_overrides={"float8": "decimal.Decimal"}` maps database type names to Python type strings. For built-in types the key is the PostgreSQL internal name (`float8`, `varchar`, `timestamptz`), not the SQL-standard spelling (`double precision`, `character varying`); for a user-defined enum, domain or extension type it is the type name as declared (`custom_int`, `citext`). A key that no query column or parameter uses raises `ValueError` listing the type names actually in use.

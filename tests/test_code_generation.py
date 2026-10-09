@@ -1,4 +1,5 @@
 import importlib.resources
+import os
 import re
 import sys
 from ast import parse
@@ -7,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from iron_sql.codegen import SQLGenerationError
-from iron_sql.codegen import generate_sql_module
+from iron_sql.codegen import render_sql_module
 from iron_sql.codegen.generator import JSONModelRef
 from iron_sql.codegen.generator import ModuleExprRef
 from iron_sql.codegen.generator import ParamSpec
@@ -38,7 +39,7 @@ q2 = testdb_sql("SELECT username FROM users")
 q3 = testdb_sql("SELECT id FROM users")
 """
     )
-    test_project.generate_checked()
+    test_project.generate()
 
     generated = (
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
@@ -176,8 +177,7 @@ q2 = testdb_sql("SELECT id, username FROM users", row_type="UserMini")
 """
     )
 
-    changed, _ = test_project.generate_checked()
-    assert changed is True
+    test_project.generate()
 
 
 def test_sqlc_failure_raises(test_project: ProjectBuilder) -> None:
@@ -310,8 +310,7 @@ def test_json_param_generates_successfully(test_project: ProjectBuilder) -> None
     test_project.add_query(
         "insert_json", "INSERT INTO json_payloads (payload) VALUES ($1)"
     )
-    changed, _ = test_project.generate_checked()
-    assert changed is True
+    test_project.generate()
 
 
 @pytest.mark.parametrize(
@@ -370,11 +369,35 @@ def test_unsupported_param_types_array(test_project: ProjectBuilder) -> None:
 
 
 def test_generator_is_idempotent(test_project: ProjectBuilder) -> None:
-    first_changed, _ = test_project.generate_checked()
-    second_changed, _ = test_project.generate_checked()
+    test_project.generate()
 
-    assert first_changed is True
-    assert second_changed is False
+    assert test_project.render().diff() == ""
+
+
+def test_render_writes_nothing_until_write(test_project: ProjectBuilder) -> None:
+    rendered = test_project.render()
+
+    assert not rendered.path.exists()
+    assert rendered.diff().startswith(f"--- /dev/null\n+++ {rendered.path}\n")
+    assert not rendered.path.exists()
+
+    rendered.write()
+    assert rendered.path.read_bytes() == rendered.text.encode()
+    test_project.import_generated()
+
+
+def test_render_leaves_stale_module_untouched(test_project: ProjectBuilder) -> None:
+    rendered = test_project.render()
+    rendered.write()
+    stale = "# stale\n" + rendered.text
+    rendered.path.write_text(stale, encoding="utf-8")
+    os.utime(rendered.path, ns=(1_000_000_000, 1_000_000_000))
+
+    diff = test_project.render().diff()
+
+    assert "\n-# stale\n" in diff
+    assert rendered.path.read_text(encoding="utf-8") == stale
+    assert rendered.path.stat().st_mtime_ns == 1_000_000_000
 
 
 def test_generator_valid_explicit_row_type(test_project: ProjectBuilder) -> None:
@@ -387,8 +410,7 @@ def test_generator_valid_explicit_row_type(test_project: ProjectBuilder) -> None
         q = testdb_sql("SELECT id, username FROM users", row_type="UserMini")
         """
     )
-    changed, _ = test_project.generate_checked()
-    assert changed is True
+    test_project.generate()
 
 
 async def test_special_types_params(test_project: ProjectBuilder) -> None:
@@ -409,8 +431,7 @@ async def test_special_types_params(test_project: ProjectBuilder) -> None:
         """INSERT INTO special_types (id, d, t, ts, b, j)
 VALUES ($1, $2, $3, $4, $5, $6)""",
     )
-    changed, _ = test_project.generate_checked()
-    assert changed is True
+    test_project.generate()
 
 
 def test_module_expr_ref_parse_and_evaluate(test_project: ProjectBuilder) -> None:
@@ -469,13 +490,13 @@ CONFIG = Config("{test_project.dsn}")
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
 
-    generate_sql_module(
+    render_sql_module(
         schema_path=Path("schema.sql"),
         module_full_name=test_project.module_full_name,
         dsn_expr=f"{test_project.app_pkg}.config:CONFIG.get_dsn()",
         src_path=test_project.src_path,
         tempdir_path=test_project.src_path,
-    )
+    ).write()
     test_project.import_generated()
 
     generated_path = (
@@ -501,13 +522,13 @@ def select_dsn(value: str) -> str:
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
 
-    generate_sql_module(
+    render_sql_module(
         schema_path=Path("schema.sql"),
         module_full_name=test_project.module_full_name,
         dsn_expr=f"{test_project.app_pkg}.config:select_dsn(BASE_DSN)",
         src_path=test_project.src_path,
         tempdir_path=test_project.src_path,
-    )
+    ).write()
     test_project.import_generated()
     generated = (
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
@@ -530,13 +551,13 @@ def test_module_expression_imports_names_read_by_lambda_defaults(
         sys.path.insert(0, str(test_project.src_path))
 
     expression = "(lambda value=DSN, *, required: value)(required=None)"
-    generate_sql_module(
+    render_sql_module(
         schema_path=Path("schema.sql"),
         module_full_name=test_project.module_full_name,
         dsn_expr=f"{test_project.app_pkg}.config:{expression}",
         src_path=test_project.src_path,
         tempdir_path=test_project.src_path,
-    )
+    ).write()
     test_project.import_generated()
     generated = (
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
@@ -562,13 +583,13 @@ def test_invalid_dsn_expression_fails_before_generation(
     test_project.write_queries()
 
     with pytest.raises(ValueError, match=message):
-        generate_sql_module(
+        render_sql_module(
             schema_path=Path("schema.sql"),
             module_full_name=test_project.module_full_name,
             dsn_expr=dsn_expr,
             src_path=test_project.src_path,
             tempdir_path=test_project.src_path,
-        )
+        ).write()
 
 
 def test_dsn_expression_rejects_non_string_value(
@@ -581,13 +602,13 @@ def test_dsn_expression_rejects_non_string_value(
         sys.path.insert(0, str(test_project.src_path))
 
     with pytest.raises(TypeError, match="must evaluate to str, got: int"):
-        generate_sql_module(
+        render_sql_module(
             schema_path=Path("schema.sql"),
             module_full_name=test_project.module_full_name,
             dsn_expr=f"{test_project.app_pkg}.config:DSN",
             src_path=test_project.src_path,
             tempdir_path=test_project.src_path,
-        )
+        ).write()
 
 
 def test_dsn_expr_with_factory_call_generates_valid_python(
@@ -608,13 +629,13 @@ def get_dsn() -> str:
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
 
-    generate_sql_module(
+    render_sql_module(
         schema_path=Path("schema.sql"),
         module_full_name=test_project.module_full_name,
         dsn_expr=f"{test_project.app_pkg}.config:get_dsn()",
         src_path=test_project.src_path,
         tempdir_path=test_project.src_path,
-    )
+    ).write()
     test_project.import_generated()
 
     generated_path = (
@@ -638,14 +659,14 @@ def test_pool_options_expr(test_project: ProjectBuilder) -> None:
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
 
-    generate_sql_module(
+    render_sql_module(
         schema_path=Path("schema.sql"),
         module_full_name=test_project.module_full_name,
         dsn_expr=f"{test_project.app_pkg}.config:DSN",
         pool_options_expr=f"{test_project.app_pkg}.config:POOL_OPTIONS",
         src_path=test_project.src_path,
         tempdir_path=test_project.src_path,
-    )
+    ).write()
     test_project.import_generated()
 
     generated_path = (
@@ -672,14 +693,14 @@ def get_pool_options() -> dict[str, object]:
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
 
-    generate_sql_module(
+    render_sql_module(
         schema_path=Path("schema.sql"),
         module_full_name=test_project.module_full_name,
         dsn_expr=f"{test_project.app_pkg}.config:DSN",
         pool_options_expr=f"{test_project.app_pkg}.config:get_pool_options()",
         src_path=test_project.src_path,
         tempdir_path=test_project.src_path,
-    )
+    ).write()
     test_project.import_generated()
 
     generated_path = (
@@ -704,14 +725,14 @@ def test_pool_options_expr_invalid_fails_during_generation(
         sys.path.insert(0, str(test_project.src_path))
 
     with pytest.raises(NameError, match="MISSING_POOL_OPTIONS"):
-        generate_sql_module(
+        render_sql_module(
             schema_path=Path("schema.sql"),
             module_full_name=test_project.module_full_name,
             dsn_expr=f"{test_project.app_pkg}.config:DSN",
             pool_options_expr=f"{test_project.app_pkg}.config:MISSING_POOL_OPTIONS",
             src_path=test_project.src_path,
             tempdir_path=test_project.src_path,
-        )
+        ).write()
 
     generated_path = (
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
@@ -732,14 +753,14 @@ def test_pool_options_expression_rejects_non_dict_value(
         sys.path.insert(0, str(test_project.src_path))
 
     with pytest.raises(TypeError, match="must evaluate to dict, got: list"):
-        generate_sql_module(
+        render_sql_module(
             schema_path=Path("schema.sql"),
             module_full_name=test_project.module_full_name,
             dsn_expr=f"{test_project.app_pkg}.config:DSN",
             pool_options_expr=f"{test_project.app_pkg}.config:POOL_OPTIONS",
             src_path=test_project.src_path,
             tempdir_path=test_project.src_path,
-        )
+        ).write()
 
 
 def test_sqlc_debug_output_tracks_the_latest_generation(
@@ -769,7 +790,7 @@ def test_sqlc_debug_output_tracks_the_latest_generation(
 
 def test_pool_options_expr_not_set(test_project: ProjectBuilder) -> None:
     test_project.add_query("q", "SELECT 1 as value")
-    test_project.generate_checked()
+    test_project.generate()
 
     generated_path = (
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"

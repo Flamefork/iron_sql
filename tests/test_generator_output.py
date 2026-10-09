@@ -14,7 +14,7 @@ from typing import cast
 
 import pytest
 
-from iron_sql.codegen import generate_sql_module
+from iron_sql.codegen import render_sql_module
 from tests.conftest import basedpyright_report
 from tests.json_models import UserMetadata
 from tests.test_type_system import generated_class
@@ -99,13 +99,13 @@ def test_single_component_module_name(test_project: ProjectBuilder) -> None:
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
 
-    generate_sql_module(
+    render_sql_module(
         schema_path=Path("schema.sql"),
         module_full_name="testdb",
         dsn_expr=f"{test_project.app_pkg}.config:DSN",
         src_path=test_project.src_path,
         tempdir_path=test_project.src_path,
-    )
+    ).write()
 
     generated_path = test_project.src_path / "testdb.py"
     compile(generated_path.read_text(encoding="utf-8"), str(generated_path), "exec")
