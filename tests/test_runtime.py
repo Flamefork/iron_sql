@@ -9,6 +9,7 @@ from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import TypeAdapter
 
 from iron_sql.runtime import ConnectionPool
 from iron_sql.runtime import TooManyRowsError
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
 
 def test_json_validated_applies_validation() -> None:
     @dataclass(kw_only=True)
-    @json_validated(metadata=UserMetadata)
+    @json_validated(metadata=(UserMetadata, "text"))
     class Row:
         metadata: UserMetadata
         other: int
@@ -51,7 +52,7 @@ def test_json_validated_applies_validation() -> None:
 
 def test_json_validated_chains_existing_post_init() -> None:
     @dataclass(kw_only=True)
-    @json_validated(metadata=UserMetadata)
+    @json_validated(metadata=(UserMetadata, "decoded"))
     class Row:
         metadata: UserMetadata
         extra: str = ""
@@ -67,7 +68,7 @@ def test_json_validated_chains_existing_post_init() -> None:
 
 def test_json_validated_skips_none() -> None:
     @dataclass(kw_only=True)
-    @json_validated(metadata=UserMetadata)
+    @json_validated(metadata=(UserMetadata, "decoded"))
     class Row:
         metadata: UserMetadata | None
 
@@ -145,7 +146,9 @@ async def test_typed_json_scalar_row_validates_model(pool: ConnectionPool) -> No
     async with (
         pool.connection() as conn,
         conn.cursor(
-            row_factory=typed_json_scalar_row(UserMetadata, not_null=True)
+            row_factory=typed_json_scalar_row(
+                TypeAdapter(UserMetadata), "decoded", not_null=True
+            )
         ) as cur,
     ):
         await cur.execute('SELECT \'{"key": "k", "value": "v"}\'::jsonb')

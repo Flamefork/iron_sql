@@ -455,16 +455,21 @@ class ConnectionPool:
                 context_var.reset(token)
 
 
-def validate_json_field[T](typ: type[T], value: object) -> T:
-    adapter = get_adapter(typ)
-    if isinstance(value, str | bytes):
-        validated = adapter.validate_json(value)
-    else:
-        validated = adapter.validate_python(value)
-    return cast("T", validated)
+type JSONFormat = Literal["decoded", "text"]
 
 
-def json_validated[T](**json_fields: object) -> Callable[[type[T]], type[T]]:
+def validate_json_field[T](
+    adapter: TypeAdapter[T], json_format: JSONFormat, value: object
+) -> T:
+    if json_format == "text":
+        # psycopg loads text and varchar columns as str.
+        return adapter.validate_json(cast("str", value))
+    return adapter.validate_python(value)
+
+
+def json_validated[T](
+    **json_fields: tuple[object, JSONFormat],
+) -> Callable[[type[T]], type[T]]:
     def decorator(cls: type[T]) -> type[T]:
         original_post_init = cast(
             "Callable[[object], None] | None", getattr(cls, "__post_init__", None)
@@ -473,12 +478,15 @@ def json_validated[T](**json_fields: object) -> Callable[[type[T]], type[T]]:
         def __post_init__(self: object) -> None:  # noqa: N807
             if original_post_init is not None:
                 original_post_init(self)
-            for name, typ in json_fields.items():
+            for name, (typ, json_format) in json_fields.items():
                 current = cast("object", getattr(self, name))
                 if current is None:
                     continue
-                field_type = cast("type[object]", typ)
-                setattr(self, name, validate_json_field(field_type, current))
+                setattr(
+                    self,
+                    name,
+                    validate_json_field(get_adapter(typ), json_format, current),
+                )
 
         setattr(cls, "__post_init__", __post_init__)  # noqa: B010
         return cls
@@ -517,7 +525,6 @@ def typed_scalar_row[T](
     typ: type[T],
     *,
     not_null: Literal[True],
-    validate: Callable[[object], T] | None = None,
 ) -> psycopg.rows.BaseRowFactory[T]: ...
 
 
@@ -526,39 +533,22 @@ def typed_scalar_row[T](
     typ: type[T],
     *,
     not_null: Literal[False],
-    validate: Callable[[object], T] | None = None,
 ) -> psycopg.rows.BaseRowFactory[T | None]: ...
 
 
 def typed_scalar_row[T](
-    typ: type[T], *, not_null: bool, validate: Callable[[object], T] | None = None
+    typ: type[T], *, not_null: bool
 ) -> psycopg.rows.BaseRowFactory[T | None]:
-    def typed_scalar_row_(
-        cursor: BaseCursor[Any, Any],
-    ) -> psycopg.rows.RowMaker[T | None]:
-        scalar_row_ = cast(
-            "psycopg.rows.RowMaker[object]", psycopg.rows.scalar_row(cursor)
-        )
+    def convert(value: object) -> T:
+        return _check_scalar_type(value, typ)
 
-        def typed_scalar_row__(values: Sequence[object]) -> T | None:
-            val = scalar_row_(values)
-            if val is None:
-                if not_null:
-                    msg = "Expected non-null value, got None"
-                    raise TypeError(msg)
-                return None
-            if validate:
-                return validate(val)
-            return _check_scalar_type(val, typ)
-
-        return typed_scalar_row__
-
-    return typed_scalar_row_
+    return _converted_scalar_row(convert, not_null=not_null)
 
 
 @overload
 def typed_json_scalar_row[T](
-    typ: type[T],
+    adapter: TypeAdapter[T],
+    json_format: JSONFormat,
     *,
     not_null: Literal[True],
 ) -> psycopg.rows.BaseRowFactory[T]: ...
@@ -566,19 +556,44 @@ def typed_json_scalar_row[T](
 
 @overload
 def typed_json_scalar_row[T](
-    typ: type[T],
+    adapter: TypeAdapter[T],
+    json_format: JSONFormat,
     *,
     not_null: Literal[False],
 ) -> psycopg.rows.BaseRowFactory[T | None]: ...
 
 
 def typed_json_scalar_row[T](
-    typ: type[T], *, not_null: bool
+    adapter: TypeAdapter[T], json_format: JSONFormat, *, not_null: bool
 ) -> psycopg.rows.BaseRowFactory[T | None]:
-    def validate(value: object) -> T:
-        return validate_json_field(typ, value)
+    def convert(value: object) -> T:
+        return validate_json_field(adapter, json_format, value)
 
-    return typed_scalar_row(typ, not_null=not_null, validate=validate)
+    return _converted_scalar_row(convert, not_null=not_null)
+
+
+def _converted_scalar_row[T](
+    convert: Callable[[object], T], *, not_null: bool
+) -> psycopg.rows.BaseRowFactory[T | None]:
+    def converted_scalar_row(
+        cursor: BaseCursor[Any, Any],
+    ) -> psycopg.rows.RowMaker[T | None]:
+        scalar_row_ = cast(
+            "psycopg.rows.RowMaker[object]", psycopg.rows.scalar_row(cursor)
+        )
+
+        def converted_scalar_row_(values: Sequence[object]) -> T | None:
+            val = scalar_row_(values)
+            if val is None:
+                if not_null:
+                    msg = "Expected non-null value, got None"
+                    raise TypeError(msg)
+                return None
+            return convert(val)
+
+        return converted_scalar_row_
+
+    return converted_scalar_row
 
 
 @overload

@@ -132,6 +132,21 @@ async def main() -> None:
     for row in counts:
         print(f"  {row.status}: {row.task_count}")
 
+    # --- Computed JSON column: tasks of each project in the same query ---
+    projects = await mydb_sql(
+        """
+        SELECT projects.id, projects.name, coalesce(
+            (SELECT json_agg(tasks ORDER BY tasks.title) FROM tasks WHERE tasks.project_id = projects.id),
+            '[]'::json
+        ) AS tasks
+        FROM projects
+        WHERE projects.owner_id = @owner_id
+        """,
+        json_model_overrides={"tasks": "example.models:TaskSummaryList"},
+    ).query_all_rows(owner_id=user_id)
+    for project in projects:
+        print(f"  {project.name}: {project.tasks}")
+
     # --- Scalar query: get task ID by title ---
     found_id = await mydb_sql(
         "SELECT id FROM tasks WHERE project_id = @project_id AND title = @title"

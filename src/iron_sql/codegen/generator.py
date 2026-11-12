@@ -47,12 +47,12 @@ _DEFAULT_SRC_PATH = Path()
 @dataclass(kw_only=True, frozen=True)
 class JSONModelRef:
     module_path: str
-    class_path: str
+    type_path: str
     origin: str = dataclasses.field(compare=False, repr=False)
 
     @property
     def expression(self) -> str:
-        return f"{self.module_path}.{self.class_path}"
+        return f"{self.module_path}.{self.type_path}"
 
     @property
     def import_statement(self) -> str:
@@ -61,6 +61,35 @@ class JSONModelRef:
     @property
     def binding(self) -> str:
         return self.module_path.partition(".")[0]
+
+    @property
+    def setting_value(self) -> str:
+        return f"{self.module_path}:{self.type_path}"
+
+
+def _parse_json_model_ref(setting: str, value: str, origin: str) -> JSONModelRef:
+    module_path, sep, type_path = value.partition(":")
+    if not (sep and module_path and type_path):
+        msg = (
+            f"{setting}={value!r}: expected a 'module:Name' value, a dotted module "
+            "path and the name of a type in it"
+        )
+        raise SQLGenerationError(msg)
+    return JSONModelRef(module_path=module_path, type_path=type_path, origin=origin)
+
+
+def _merge_json_models(refs: list[JSONModelRef]) -> tuple[JSONModelRef, ...]:
+    origins_by_path: defaultdict[tuple[str, str], list[str]] = defaultdict(list)
+    for ref in refs:
+        origins_by_path[ref.module_path, ref.type_path].append(ref.origin)
+    return tuple(
+        JSONModelRef(
+            module_path=module_path,
+            type_path=type_path,
+            origin="; ".join(dict.fromkeys(origins)),
+        )
+        for (module_path, type_path), origins in sorted(origins_by_path.items())
+    )
 
 
 @dataclass(kw_only=True, frozen=True)
@@ -77,21 +106,34 @@ class ModuleImportSpec:
     origin: str
 
 
+# How psycopg hands over a JSON-capable column: json and jsonb arrive decoded,
+# text and varchar arrive as the JSON text. Spelled as runtime.JSONFormat.
+_JSON_FORMATS = {
+    "json": "decoded",
+    "jsonb": "decoded",
+    "text": "text",
+    "varchar": "text",
+}
+
+_JSON_PARAM_DUMPERS = {
+    "decoded": "runtime.dump_json_value",
+    "text": "runtime.dump_json_text",
+}
+
+
+@dataclass(kw_only=True, frozen=True)
+class JSONColumn:
+    model: JSONModelRef
+    json_format: str
+
+
 @dataclass(kw_only=True, frozen=True)
 class ColumnSpec:
     name: str
     table: str
     py_type: str
     element_py_type: str | None = None
-    json_model: JSONModelRef | None = None
-
-
-_JSON_PARAM_DUMPERS = {
-    "json": "runtime.dump_json_value",
-    "jsonb": "runtime.dump_json_value",
-    "text": "runtime.dump_json_text",
-    "varchar": "runtime.dump_json_text",
-}
+    json: JSONColumn | None = None
 
 
 @dataclass(kw_only=True, frozen=True)
@@ -108,7 +150,7 @@ class ParamSpec:
         expr = self.name
         wraps_value = False
         if self.json_model is not None:
-            dump_fn = _JSON_PARAM_DUMPERS[self.db_type]
+            dump_fn = _JSON_PARAM_DUMPERS[_JSON_FORMATS[self.db_type]]
             expr = f"{dump_fn}({self.json_model.expression}, {self.name})"
             wraps_value = True
         match self.db_type:
@@ -285,18 +327,28 @@ class TypeResolver:
     type_overrides: dict[str, str]
     json_column_type_overrides: dict[tuple[str, str], JSONModelRef]
 
-    def column_spec(self, column: Column) -> ColumnSpec:
-        _, py_type, element_py_type, json_model = self._resolve(column)
+    def column_spec(
+        self, column: Column, query_json_models: dict[str, JSONModelRef]
+    ) -> ColumnSpec:
+        # The override on the query names its result column, so it wins over the
+        # override on the table the column happens to come from.
+        json_model = query_json_models.get(column.name) or self._table_json_model(
+            column
+        )
+        db_type, py_type, element_py_type = self._resolve(column, json_model)
         return ColumnSpec(
             name=column.name,
             table=column.table.name if column.table else "unknown",
             py_type=py_type,
             element_py_type=element_py_type,
-            json_model=json_model,
+            json=JSONColumn(model=json_model, json_format=_JSON_FORMATS[db_type])
+            if json_model is not None
+            else None,
         )
 
     def param_spec(self, column: Column, name: str, *, is_named: bool) -> ParamSpec:
-        db_type, py_type, _, json_model = self._resolve(column)
+        json_model = self._table_json_model(column)
+        db_type, py_type, _ = self._resolve(column, json_model)
         return ParamSpec(
             name=name,
             py_type=py_type,
@@ -306,18 +358,18 @@ class TypeResolver:
             json_model=json_model,
         )
 
-    def _resolve(
-        self, column: Column
-    ) -> tuple[str, str, str | None, JSONModelRef | None]:
-        db_type = canonical_type_name(column, self.catalog)
+    def _table_json_model(self, column: Column) -> JSONModelRef | None:
+        if column.table is None:
+            return None
+        return self.json_column_type_overrides.get((
+            column.table.name,
+            column.original_name or column.name,
+        ))
 
-        json_model = None
-        if column.table is not None:
-            col_name = column.original_name or column.name
-            json_model = self.json_column_type_overrides.get((
-                column.table.name,
-                col_name,
-            ))
+    def _resolve(
+        self, column: Column, json_model: JSONModelRef | None
+    ) -> tuple[str, str, str | None]:
+        db_type = canonical_type_name(column, self.catalog)
 
         if json_model is not None:
             py_type = json_model.expression
@@ -347,7 +399,7 @@ class TypeResolver:
         if not column.not_null:
             py_type += " | None"
 
-        return db_type, py_type, element_py_type, json_model
+        return db_type, py_type, element_py_type
 
 
 def all_columns(sqlc_res: SQLCResult) -> Iterator[Column]:
@@ -662,9 +714,20 @@ def render_sql_module(  # noqa: PLR0913, PLR0914
     }
     validate_type_overrides(normalized_type_overrides, sqlc_res)
 
-    json_models, json_column_type_overrides = resolve_json_model_overrides(
+    json_column_type_overrides = resolve_json_model_overrides(
         json_model_overrides or {}, sqlc_res.catalog
     )
+    code_queries_by_name = {query.name: query for query in queries}
+    _validate_query_json_model_overrides(
+        sqlc_res.queries,
+        code_queries_by_name,
+        query_locations_by_name,
+        sqlc_res.catalog,
+    )
+    json_models = _merge_json_models([
+        *json_column_type_overrides.values(),
+        *(ref for query in queries for ref in query.json_model_overrides.values()),
+    ])
 
     resolver = TypeResolver(
         catalog=sqlc_res.catalog,
@@ -695,10 +758,14 @@ def render_sql_module(  # noqa: PLR0913, PLR0914
         for query in sqlc_res.queries
     }
     query_result_columns_by_name = {
-        query.name: tuple(resolver.column_spec(column) for column in query.columns)
+        query.name: tuple(
+            resolver.column_spec(
+                column, code_queries_by_name[query.name].json_model_overrides
+            )
+            for column in query.columns
+        )
         for query in sqlc_res.queries
     }
-    code_queries_by_name = {query.name: query for query in queries}
     query_render_specs_by_name = {
         query.name: build_query_class_render_spec(
             code_queries_by_name[query.name].class_name,
@@ -771,10 +838,7 @@ def render_sql_module(  # noqa: PLR0913, PLR0914
 
     query_classes = render_query_classes(query_specs)
 
-    query_overloads = [
-        render_query_overload(sql_fn_name, q.class_name, q.sql, q.row_type)
-        for q in queries
-    ]
+    query_overloads = [render_query_overload(sql_fn_name, q) for q in queries]
 
     query_dict_entries = [render_query_dict_entry(q.class_name, q.sql) for q in queries]
 
@@ -797,7 +861,7 @@ def render_sql_module(  # noqa: PLR0913, PLR0914
 def collect_queries(src_path: Path, sql_fn_name: str) -> "DiscoveredQueries":
     scanned = walk_scanned_tree(src_path)
     raw = list(find_all_queries(src_path, scanned.files, sql_fn_name))
-    validate_sql_has_single_row_type(raw)
+    validate_sql_has_single_call_settings(raw)
     query_locations_by_name: defaultdict[str, list[str]] = defaultdict(list)
     first_occurrence: dict[str, CodeQuery] = {}
     for q in raw:
@@ -835,11 +899,7 @@ def render_query_classes(queries: tuple["GeneratedQuerySpec", ...]) -> list[str]
 
 def resolve_json_model_overrides(
     overrides: dict[str, str], catalog: Catalog
-) -> tuple[tuple[JSONModelRef, ...], dict[tuple[str, str], JSONModelRef]]:
-    if not overrides:
-        return (), {}
-
-    json_compatible_types = set(_JSON_PARAM_DUMPERS)
+) -> dict[tuple[str, str], JSONModelRef]:
     col_types = {
         (table.rel.name, column.name): canonical_type_name(column, catalog)
         for schema in catalog.schemas
@@ -848,8 +908,8 @@ def resolve_json_model_overrides(
     }
     tables = {table for table, _ in col_types}
 
-    parsed: dict[tuple[str, str], tuple[str, str, str]] = {}
-    for key, import_path in overrides.items():
+    column_refs: dict[tuple[str, str], JSONModelRef] = {}
+    for key, value in overrides.items():
         setting = f"json_model_overrides[{key!r}]"
         table_name, sep, col_name = key.partition(".")
         if not sep:
@@ -869,42 +929,74 @@ def resolve_json_model_overrides(
             raise SQLGenerationError(msg)
 
         db_type = col_types[table_name, col_name]
-        if db_type not in json_compatible_types:
+        if db_type not in _JSON_FORMATS:
             msg = (
                 f"{setting}: column {table_name}.{col_name} has type {db_type!r}; "
-                "a JSON model override needs a column of type "
-                f"{', '.join(sorted(json_compatible_types))}"
+                f"{_JSON_COLUMN_TYPES_REQUIREMENT}"
             )
             raise SQLGenerationError(msg)
 
-        module_path, sep, class_name = import_path.partition(":")
-        if not sep:
-            msg = (
-                f"{setting}={import_path!r}: expected a 'module:Class' value, a "
-                "dotted module path and the model class in it"
-            )
-            raise SQLGenerationError(msg)
-
-        origin = f"json_model_overrides[{key!r}] = {import_path!r}"
-        parsed[table_name, col_name] = (module_path, class_name, origin)
-
-    import_paths = sorted({(module, cls) for module, cls, _ in parsed.values()})
-    origins_by_path: defaultdict[tuple[str, str], list[str]] = defaultdict(list)
-    for module_path, class_path, origin in parsed.values():
-        origins_by_path[module_path, class_path].append(origin)
-    refs_by_path = {
-        (module_path, class_path): JSONModelRef(
-            module_path=module_path,
-            class_path=class_path,
-            origin="; ".join(origins_by_path[module_path, class_path]),
+        column_refs[table_name, col_name] = _parse_json_model_ref(
+            setting, value, origin=f"{setting} = {value!r}"
         )
-        for module_path, class_path in import_paths
-    }
-    column_refs = {
-        key: refs_by_path[module_path, class_path]
-        for key, (module_path, class_path, _) in parsed.items()
-    }
-    return tuple(refs_by_path[path] for path in import_paths), column_refs
+    return column_refs
+
+
+_JSON_COLUMN_TYPES_REQUIREMENT = (
+    f"a JSON model override needs a column of type {', '.join(sorted(_JSON_FORMATS))}"
+)
+
+
+def _validate_query_json_model_overrides(
+    queries_from_sqlc: tuple[Query, ...],
+    code_queries_by_name: dict[str, "CodeQuery"],
+    query_locations_by_name: dict[str, list[str]],
+    catalog: Catalog,
+) -> None:
+    for query in queries_from_sqlc:
+        where = ", ".join(query_locations_by_name[query.name])
+        columns_by_name: defaultdict[str, list[Column]] = defaultdict(list)
+        for column in query.columns:
+            columns_by_name[column.name].append(column)
+        for key in code_queries_by_name[query.name].json_model_overrides:
+            setting = f"{where}: json_model_overrides[{key!r}]"
+            match columns_by_name[key]:
+                case []:
+                    names = ", ".join(column.name for column in query.columns)
+                    msg = f"{setting}: the query has no result column {key!r}; " + (
+                        f"use one of its result columns: {names}"
+                        if names
+                        else "the query returns no result columns, remove the key"
+                    )
+                    raise SQLGenerationError(msg)
+                case [column]:
+                    _validate_query_json_column(setting, key, column, catalog)
+                case columns:
+                    msg = (
+                        f"{setting}: {len(columns)} result columns are named "
+                        f"{key!r}; give each of them a distinct alias with AS"
+                    )
+                    raise SQLGenerationError(msg)
+
+
+def _validate_query_json_column(
+    setting: str, key: str, column: Column, catalog: Catalog
+) -> None:
+    if column.pg_type_name == "any":
+        msg = (
+            f"{setting}: sqlc could not infer the type of result column {key!r}; "
+            "give the expression a type, for example a cast to json or jsonb, or "
+            "generate with a DSN"
+        )
+        raise SQLGenerationError(msg)
+    db_type = canonical_type_name(column, catalog)
+    if column.is_array or db_type not in _JSON_FORMATS:
+        shown_type = f"{db_type}[]" if column.is_array else db_type
+        msg = (
+            f"{setting}: result column {key!r} has type {shown_type!r}; "
+            f"{_JSON_COLUMN_TYPES_REQUIREMENT}"
+        )
+        raise SQLGenerationError(msg)
 
 
 _FIXED_MODULE_IMPORT_SPECS = (
@@ -995,6 +1087,9 @@ _FIXED_MODULE_IMPORT_SPECS = (
         source="import psycopg.types.json",
         binding="psycopg",
         origin="generated psycopg imports",
+    ),
+    ModuleImportSpec(
+        source="import pydantic", binding="pydantic", origin="generated import pydantic"
     ),
     ModuleImportSpec(
         source="from iron_sql import runtime",
@@ -1673,8 +1768,8 @@ def validate_generated_names(module: GeneratedModuleSpec) -> None:
         )
         issues.extend(
             dotted_path_name_issues(
-                "JSON model override class path",
-                json_model.class_path,
+                "JSON model override type path",
+                json_model.type_path,
                 json_model.origin,
                 all_locations,
             )
@@ -1881,6 +1976,8 @@ def {sql_fn_name}(sql: builtins.str) -> Query[Any]: ...
 def {sql_fn_name}(
     sql: builtins.str,
     row_type: builtins.str | None = None,
+    *,
+    json_model_overrides: builtins.dict[builtins.str, builtins.str] | None = None,
 ) -> Query[Any]:
     if sql in _QUERIES:
         return _QUERIES[sql]()
@@ -1936,13 +2033,13 @@ class {class_name}(StrEnum):
 def render_entity(name: str, columns: tuple[ColumnSpec, ...]) -> str:
     fields = "\n    ".join(f"{c.name}: {c.py_type}" for c in columns)
     json_cols = [
-        (column.name, column.json_model.expression)
+        f"{column.name}=({column.json.model.expression}, {column.json.json_format!r})"
         for column in columns
-        if column.json_model is not None
+        if column.json is not None
     ]
     validated = ""
     if json_cols:
-        args = ", ".join(f"{n}={jt}" for n, jt in json_cols)
+        args = ", ".join(json_cols)
         validated = f"\n@runtime.json_validated({args})"
 
     return f"""
@@ -2233,10 +2330,13 @@ def render_scalar_row_factory(result: str, column: ColumnSpec) -> str:
     if column.element_py_type is not None:
         return f"runtime.typed_array_row({column.element_py_type}, not_null={not_null})"
 
-    if column.json_model is not None:
+    if column.json is not None:
+        # The adapter carries the type of a type alias, which type[T] cannot.
+        expression = column.json.model.expression
         return (
             "runtime.typed_json_scalar_row("
-            f"{column.json_model.expression}, not_null={not_null})"
+            f"pydantic.TypeAdapter[{expression}]({expression}), "
+            f"{column.json.json_format!r}, not_null={not_null})"
         )
 
     if " | " in base_result:
@@ -2245,17 +2345,17 @@ def render_scalar_row_factory(result: str, column: ColumnSpec) -> str:
     return f"runtime.typed_scalar_row({base_result}, not_null={not_null})"
 
 
-def render_query_overload(
-    sql_fn_name: str, query_name: str, sql: str, row_type: str | None
-) -> str:
-    result_arg = ""
-    if row_type:
-        result_arg = f", row_type: Literal[{row_type!r}]"
+def render_query_overload(sql_fn_name: str, query: "CodeQuery") -> str:
+    args = f"sql: Literal[{query.sql!r}]"
+    if query.row_type:
+        args += f", row_type: Literal[{query.row_type!r}]"
+    # Optional at every call: {} is the same setting as no keyword argument.
+    args += ", *, json_model_overrides: builtins.dict[builtins.str, builtins.str] = ..."
 
     return f"""
 
 @overload
-def {sql_fn_name}(sql: Literal[{sql!r}]{result_arg}) -> {query_name}: ...
+def {sql_fn_name}({args}) -> {query.class_name}: ...
 
     """.strip()
 
@@ -2268,6 +2368,7 @@ def render_query_dict_entry(query_name: str, sql: str) -> str:
 class CodeQuery:
     sql: str
     row_type: str | None
+    json_model_overrides: dict[str, JSONModelRef]
     file: Path
     lineno: int
 
@@ -2284,6 +2385,13 @@ class CodeQuery:
     @property
     def location(self) -> str:
         return f"{self.file}:{self.lineno}"
+
+    @property
+    def shown_json_model_overrides(self) -> dict[str, str]:
+        return {
+            key: ref.setting_value
+            for key, ref in sorted(self.json_model_overrides.items())
+        }
 
 
 @dataclass(kw_only=True, frozen=True)
@@ -2313,6 +2421,7 @@ class SQLEntity:
     explicit_name: str | None
     table_name: str | None
     columns: tuple[Column, ...]
+    json_models: dict[str, JSONModelRef]
 
     @property
     def name(self) -> str:
@@ -2328,7 +2437,9 @@ class SQLEntity:
 
     @property
     def column_specs(self) -> tuple[ColumnSpec, ...]:
-        return tuple(self.resolver.column_spec(c) for c in self.columns)
+        return tuple(
+            self.resolver.column_spec(c, self.json_models) for c in self.columns
+        )
 
 
 def build_entities(
@@ -2338,7 +2449,7 @@ def build_entities(
     query_locations_by_name: dict[str, list[str]],
     resolver: TypeResolver,
 ) -> tuple[list[SQLEntity], dict[str, str]]:
-    row_types = {q.name: q.row_type for q in queries_from_code}
+    code_queries = {q.name: q for q in queries_from_code}
 
     table_entities = [
         SQLEntity(
@@ -2346,13 +2457,14 @@ def build_entities(
             explicit_name=None,
             table_name=t.rel.name,
             columns=t.columns,
+            json_models={},
         )
         for t in used_tables
     ]
     specs_to_entities = {e.column_specs: e for e in table_entities}
 
     for q in queries_from_sqlc:
-        row_type = row_types[q.name]
+        row_type = code_queries[q.name].row_type
         if not row_type or len(q.columns) > 1:
             continue
         returns = "no result columns" if not q.columns else "one result column"
@@ -2366,9 +2478,10 @@ def build_entities(
     query_result_entities = {
         q.name: SQLEntity(
             resolver=resolver,
-            explicit_name=row_types[q.name],
+            explicit_name=code_queries[q.name].row_type,
             table_name=None,
             columns=q.columns,
+            json_models=code_queries[q.name].json_model_overrides,
         )
         for q in queries_from_sqlc
         if len(q.columns) > 1
@@ -2388,7 +2501,9 @@ def build_entities(
         if len(q.columns) == 0:
             query_result_types[q.name] = "None"
         elif len(q.columns) == 1:
-            query_result_types[q.name] = resolver.column_spec(q.columns[0]).py_type
+            query_result_types[q.name] = resolver.column_spec(
+                q.columns[0], code_queries[q.name].json_model_overrides
+            ).py_type
         else:
             column_specs = query_result_entities[q.name].column_specs
             query_result_types[q.name] = unique_entities[column_specs].name
@@ -2479,8 +2594,9 @@ def find_all_queries(
     src_path: Path, files: tuple[Path, ...], sql_fn_name: str
 ) -> Iterator[CodeQuery]:
     call_form = (
-        f"expected {sql_fn_name}(<SQL string literal>) with an optional "
-        "row_type=<string literal>"
+        f"expected {sql_fn_name}(<SQL string literal>) with optional "
+        "row_type=<string literal> and json_model_overrides=<dict literal of "
+        "string literals>"
     )
     for relative_path, node in find_fn_calls(src_path, files, sql_fn_name):
         location = f"{relative_path}:{node.lineno}:{node.col_offset + 1}"
@@ -2492,46 +2608,105 @@ def find_all_queries(
             )
             raise SQLGenerationError(msg)
 
-        sql = sql_arg.value
-
         row_type = None
-        if len(node.keywords) > 1:
-            msg = f"{location}: more than one keyword argument; {call_form}"
-            raise SQLGenerationError(msg)
+        json_model_overrides: dict[str, JSONModelRef] = {}
+        seen: set[str] = set()
         for kw in node.keywords:
-            if kw.arg != "row_type":
-                argument_name = "**kwargs" if kw.arg is None else repr(kw.arg)
-                msg = (
-                    f"{location}: unsupported keyword argument {argument_name}; "
-                    f"{call_form}"
-                )
+            if kw.arg in seen:
+                msg = f"{location}: keyword argument {kw.arg!r} repeated; {call_form}"
                 raise SQLGenerationError(msg)
-            if not isinstance(kw.value, ast.Constant) or not isinstance(
-                kw.value.value, str
-            ):
-                msg = f"{location}: row_type must be a string literal; {call_form}"
-                raise SQLGenerationError(msg)
-            row_type = kw.value.value
+            match kw.arg:
+                case "row_type":
+                    if not isinstance(kw.value, ast.Constant) or not isinstance(
+                        kw.value.value, str
+                    ):
+                        msg = (
+                            f"{location}: row_type must be a string literal; "
+                            f"{call_form}"
+                        )
+                        raise SQLGenerationError(msg)
+                    row_type = kw.value.value
+                case "json_model_overrides":
+                    json_model_overrides = _parse_query_json_model_overrides(
+                        location, kw.value, call_form
+                    )
+                case _:
+                    argument_name = "**kwargs" if kw.arg is None else repr(kw.arg)
+                    msg = (
+                        f"{location}: unsupported keyword argument {argument_name}; "
+                        f"{call_form}"
+                    )
+                    raise SQLGenerationError(msg)
+            seen.add(kw.arg)
 
         yield CodeQuery(
-            sql=sql,
+            sql=sql_arg.value,
             row_type=row_type,
+            json_model_overrides=json_model_overrides,
             file=relative_path,
             lineno=node.lineno,
         )
 
 
-def validate_sql_has_single_row_type(queries: list[CodeQuery]) -> None:
+def _parse_query_json_model_overrides(
+    location: str, value: ast.expr, call_form: str
+) -> dict[str, JSONModelRef]:
+    if not isinstance(value, ast.Dict):
+        msg = (
+            f"{location}: json_model_overrides must be a dict literal with string "
+            f"literal keys and values; {call_form}"
+        )
+        raise SQLGenerationError(msg)
+    overrides: dict[str, JSONModelRef] = {}
+    for key_node, value_node in zip(value.keys, value.values, strict=True):
+        if not isinstance(key_node, ast.Constant) or not isinstance(
+            key_node.value, str
+        ):
+            msg = (
+                f"{location}: json_model_overrides keys must be string literals "
+                f"naming result columns; {call_form}"
+            )
+            raise SQLGenerationError(msg)
+        key = key_node.value
+        setting = f"{location}: json_model_overrides[{key!r}]"
+        if not isinstance(value_node, ast.Constant) or not isinstance(
+            value_node.value, str
+        ):
+            msg = f"{setting} must be a string literal 'module:Name'; {call_form}"
+            raise SQLGenerationError(msg)
+        if key in overrides:
+            msg = (
+                f"{location}: json_model_overrides repeats key {key!r}; give each "
+                "result column once"
+            )
+            raise SQLGenerationError(msg)
+        overrides[key] = _parse_json_model_ref(
+            setting,
+            value_node.value,
+            origin=f"{setting} = {value_node.value!r}",
+        )
+    return overrides
+
+
+def validate_sql_has_single_call_settings(queries: list[CodeQuery]) -> None:
     first_by_sql: dict[str, CodeQuery] = {}
     for query in queries:
-        if query.sql in first_by_sql:
-            first = first_by_sql[query.sql]
-            if query.row_type != first.row_type:
-                msg = (
-                    f"row_type conflict for the same SQL: {first.location} has "
-                    f"{first.row_type!r}, {query.location} has {query.row_type!r}; "
-                    "pass the same row_type at every call site of this SQL"
-                )
-                raise SQLGenerationError(msg)
-        else:
+        if query.sql not in first_by_sql:
             first_by_sql[query.sql] = query
+            continue
+        first = first_by_sql[query.sql]
+        if query.row_type != first.row_type:
+            msg = (
+                f"row_type conflict for the same SQL: {first.location} has "
+                f"{first.row_type!r}, {query.location} has {query.row_type!r}; "
+                "pass the same row_type at every call site of this SQL"
+            )
+            raise SQLGenerationError(msg)
+        if query.json_model_overrides != first.json_model_overrides:
+            msg = (
+                "json_model_overrides conflict for the same SQL: "
+                f"{first.location} has {first.shown_json_model_overrides}, "
+                f"{query.location} has {query.shown_json_model_overrides}; "
+                "pass the same json_model_overrides at every call site of this SQL"
+            )
+            raise SQLGenerationError(msg)

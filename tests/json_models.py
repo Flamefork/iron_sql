@@ -1,3 +1,5 @@
+import uuid
+
 from pydantic import BaseModel
 
 
@@ -12,3 +14,21 @@ class Tag(BaseModel):
 
 
 TagList = list[Tag]
+
+
+class Post(BaseModel):
+    id: int
+    title: str
+
+
+PostList = list[Post]
+
+type PostSequence = list[Post]
+
+
+class UserSummary(BaseModel):
+    id: uuid.UUID
+    username: str
+
+
+Labels = dict[str, str]

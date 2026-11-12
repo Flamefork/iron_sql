@@ -18,7 +18,7 @@ from tests.conftest import ProjectBuilder
 _USER_METADATA_TYPE = "tests.json_models.UserMetadata"
 _USER_METADATA_REF = JSONModelRef(
     module_path="tests",
-    class_path="json_models.UserMetadata",
+    type_path="json_models.UserMetadata",
     origin="test JSON model",
 )
 _JSON_METADATA_EXPR = f"runtime.dump_json_value({_USER_METADATA_TYPE}, metadata)"
@@ -129,11 +129,11 @@ def test_scanner_rejects_wrong_call_shape(test_project: ProjectBuilder) -> None:
         ),
         (
             'testdb_sql("SELECT 1", row_type="First", row_type="Second")',
-            "more than one keyword argument",
+            "keyword argument 'row_type' repeated",
         ),
         (
             'testdb_sql("SELECT 1", row_type="First", unknown="value")',
-            "more than one keyword argument",
+            "unsupported keyword argument 'unknown'",
         ),
         (
             'testdb_sql("SELECT 1", **{"row_type": "Result"})',

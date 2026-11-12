@@ -313,7 +313,7 @@ def test_invalid_config_value_without_colon(test_project: ProjectBuilder) -> Non
         SQLGenerationError,
         match=(
             r"json_model_overrides\['users\.metadata'\]='tests\.json_models\."
-            r"UserMetadata': expected a 'module:Class' value"
+            r"UserMetadata': expected a 'module:Name' value"
         ),
     ):
         test_project.generate_no_import(

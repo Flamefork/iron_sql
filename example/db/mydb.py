@@ -25,6 +25,7 @@ import psycopg
 import psycopg.rows
 import psycopg.sql
 import psycopg.types.json
+import pydantic
 from iron_sql import runtime
 from example.config import DSN
 from example.config import POOL_OPTIONS
@@ -99,7 +100,7 @@ async def mydb_notify(
 
 
 @dataclass(kw_only=True)
-@runtime.json_validated(metadata=example.models.TaskMetadata)
+@runtime.json_validated(metadata=(example.models.TaskMetadata, 'decoded'))
 class MydbTask:
     id: uuid.UUID
     project_id: uuid.UUID
@@ -110,6 +111,14 @@ class MydbTask:
     metadata: example.models.TaskMetadata | None
     due_date: datetime.date | None
     created_at: datetime.datetime
+
+
+@dataclass(kw_only=True)
+@runtime.json_validated(tasks=(example.models.TaskSummaryList, 'decoded'))
+class QueryResult_c9c2d21d21af9b587c22e8eda861498a:
+    id: uuid.UUID
+    name: builtins.str
+    tasks: example.models.TaskSummaryList | None
 
 
 @dataclass(kw_only=True)
@@ -167,7 +176,7 @@ class Query_bd4c62c78a942bfd1f087f87a19f2743(Query[None]):
 
 
 class Query_12e061f7aa94bf484295ab0018520059(Query[None]):
-    _locations = ('main.py:81', 'main.py:168')
+    _locations = ('main.py:81', 'main.py:183')
 
     _stmt = psycopg.sql.SQL('UPDATE tasks SET status = $1 WHERE id = $2')
 
@@ -202,7 +211,7 @@ class Query_46242a02ffe365dc17851a034fdc1d30(Query[MydbUser]):
 
 
 class Query_41cb2f3cea216a76ba87b6ddb70e6be5(Query[MydbUser]):
-    _locations = ('main.py:93', 'main.py:146')
+    _locations = ('main.py:93', 'main.py:161')
 
     _stmt = psycopg.sql.SQL('SELECT id, username, email, created_at FROM users WHERE id = $1')
 
@@ -225,7 +234,7 @@ class Query_41cb2f3cea216a76ba87b6ddb70e6be5(Query[MydbUser]):
 
 
 class Query_65f4a42ff09e715425bfa54a353b03fb(Query[MydbTask]):
-    _locations = ('main.py:99', 'main.py:111', 'main.py:153')
+    _locations = ('main.py:99', 'main.py:111', 'main.py:168')
 
     _stmt = psycopg.sql.SQL('SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\nFROM tasks\nWHERE project_id = $1 AND ($2::task_status IS NULL OR status = $2)')
 
@@ -270,8 +279,31 @@ class Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount(Query[TaskStatusCou
         return self._server_cursor((project_id,))
 
 
-class Query_07cbb3e5226e35adbd17171f38ab7216(Query[uuid.UUID]):
+class Query_ec08492bab8a1de35f0bccd927805a9b(Query[QueryResult_c9c2d21d21af9b587c22e8eda861498a]):
     _locations = ('main.py:136',)
+
+    _stmt = psycopg.sql.SQL("SELECT projects.id, projects.name, coalesce(\n    (SELECT json_agg(tasks ORDER BY tasks.title) FROM tasks WHERE tasks.project_id = projects.id),\n    '[]'::json\n) AS tasks\nFROM projects\nWHERE projects.owner_id = $1")
+
+    _row_factory = builtins.staticmethod(psycopg.rows.class_row(QueryResult_c9c2d21d21af9b587c22e8eda861498a))
+
+    async def query_all_rows(self, *, owner_id: uuid.UUID) -> builtins.list[QueryResult_c9c2d21d21af9b587c22e8eda861498a]:
+        async with self._client_cursor((owner_id,)) as cur:
+            return await cur.fetchall()
+
+    async def query_single_row(self, *, owner_id: uuid.UUID) -> QueryResult_c9c2d21d21af9b587c22e8eda861498a:
+        async with self._client_cursor((owner_id,)) as cur:
+            return runtime.get_one_row(await cur.fetchmany(2))
+
+    async def query_optional_row(self, *, owner_id: uuid.UUID) -> QueryResult_c9c2d21d21af9b587c22e8eda861498a | None:
+        async with self._client_cursor((owner_id,)) as cur:
+            return runtime.get_one_row_or_none(await cur.fetchmany(2))
+
+    def query_stream(self, *, owner_id: uuid.UUID) -> AbstractAsyncContextManager[AsyncIterator[QueryResult_c9c2d21d21af9b587c22e8eda861498a]]:
+        return self._server_cursor((owner_id,))
+
+
+class Query_07cbb3e5226e35adbd17171f38ab7216(Query[uuid.UUID]):
+    _locations = ('main.py:151',)
 
     _stmt = psycopg.sql.SQL('SELECT id FROM tasks WHERE project_id = $1 AND title = $2')
 
@@ -294,7 +326,7 @@ class Query_07cbb3e5226e35adbd17171f38ab7216(Query[uuid.UUID]):
 
 
 class Query_29c838280e39383dd6b0760431eb3e60(Query[builtins.int]):
-    _locations = ('main.py:174',)
+    _locations = ('main.py:189',)
 
     _stmt = psycopg.sql.SQL('SELECT count(*) FROM tasks WHERE status = $1')
 
@@ -325,31 +357,34 @@ _QUERIES: builtins.dict[builtins.str, builtins.type[Query[Any]]] = {
     'SELECT id, username, email, created_at FROM users WHERE id = @user_id': Query_41cb2f3cea216a76ba87b6ddb70e6be5,
     '\n        SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\n        FROM tasks\n        WHERE project_id = @project_id AND (@status?::task_status IS NULL OR status = @status?)\n        ': Query_65f4a42ff09e715425bfa54a353b03fb,
     '\n        SELECT status, count(*) AS task_count\n        FROM tasks WHERE project_id = @project_id\n        GROUP BY status ORDER BY status\n        ': Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount,
+    "\n        SELECT projects.id, projects.name, coalesce(\n            (SELECT json_agg(tasks ORDER BY tasks.title) FROM tasks WHERE tasks.project_id = projects.id),\n            '[]'::json\n        ) AS tasks\n        FROM projects\n        WHERE projects.owner_id = @owner_id\n        ": Query_ec08492bab8a1de35f0bccd927805a9b,
     'SELECT id FROM tasks WHERE project_id = @project_id AND title = @title': Query_07cbb3e5226e35adbd17171f38ab7216,
     'SELECT count(*) FROM tasks WHERE status = @status': Query_29c838280e39383dd6b0760431eb3e60
 }
 
 
 @overload
-def mydb_sql(sql: Literal['\n            INSERT INTO users (id, username, email)\n            VALUES (@id, @username, @email)\n            ']) -> Query_3ee53b6909da8b4496346dda36c9f442: ...
+def mydb_sql(sql: Literal['\n            INSERT INTO users (id, username, email)\n            VALUES (@id, @username, @email)\n            '], *, json_model_overrides: builtins.dict[builtins.str, builtins.str] = ...) -> Query_3ee53b6909da8b4496346dda36c9f442: ...
 @overload
-def mydb_sql(sql: Literal['\n            INSERT INTO projects (id, name, owner_id, settings)\n            VALUES (@id, @name, @owner_id, @settings)\n            ']) -> Query_67ac0768d48a654b1a305124c92372e8: ...
+def mydb_sql(sql: Literal['\n            INSERT INTO projects (id, name, owner_id, settings)\n            VALUES (@id, @name, @owner_id, @settings)\n            '], *, json_model_overrides: builtins.dict[builtins.str, builtins.str] = ...) -> Query_67ac0768d48a654b1a305124c92372e8: ...
 @overload
-def mydb_sql(sql: Literal['\n        INSERT INTO tasks (id, project_id, title, priority, assignee_id, metadata, due_date)\n        VALUES (@id, @project_id, @title, @priority, @assignee_id?, @metadata?, @due_date?)\n        ']) -> Query_bd4c62c78a942bfd1f087f87a19f2743: ...
+def mydb_sql(sql: Literal['\n        INSERT INTO tasks (id, project_id, title, priority, assignee_id, metadata, due_date)\n        VALUES (@id, @project_id, @title, @priority, @assignee_id?, @metadata?, @due_date?)\n        '], *, json_model_overrides: builtins.dict[builtins.str, builtins.str] = ...) -> Query_bd4c62c78a942bfd1f087f87a19f2743: ...
 @overload
-def mydb_sql(sql: Literal['UPDATE tasks SET status = @status WHERE id = @task_id']) -> Query_12e061f7aa94bf484295ab0018520059: ...
+def mydb_sql(sql: Literal['UPDATE tasks SET status = @status WHERE id = @task_id'], *, json_model_overrides: builtins.dict[builtins.str, builtins.str] = ...) -> Query_12e061f7aa94bf484295ab0018520059: ...
 @overload
-def mydb_sql(sql: Literal['SELECT id, username, email, created_at FROM users ORDER BY created_at']) -> Query_46242a02ffe365dc17851a034fdc1d30: ...
+def mydb_sql(sql: Literal['SELECT id, username, email, created_at FROM users ORDER BY created_at'], *, json_model_overrides: builtins.dict[builtins.str, builtins.str] = ...) -> Query_46242a02ffe365dc17851a034fdc1d30: ...
 @overload
-def mydb_sql(sql: Literal['SELECT id, username, email, created_at FROM users WHERE id = @user_id']) -> Query_41cb2f3cea216a76ba87b6ddb70e6be5: ...
+def mydb_sql(sql: Literal['SELECT id, username, email, created_at FROM users WHERE id = @user_id'], *, json_model_overrides: builtins.dict[builtins.str, builtins.str] = ...) -> Query_41cb2f3cea216a76ba87b6ddb70e6be5: ...
 @overload
-def mydb_sql(sql: Literal['\n        SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\n        FROM tasks\n        WHERE project_id = @project_id AND (@status?::task_status IS NULL OR status = @status?)\n        ']) -> Query_65f4a42ff09e715425bfa54a353b03fb: ...
+def mydb_sql(sql: Literal['\n        SELECT id, project_id, assignee_id, title, status, priority, metadata, due_date, created_at\n        FROM tasks\n        WHERE project_id = @project_id AND (@status?::task_status IS NULL OR status = @status?)\n        '], *, json_model_overrides: builtins.dict[builtins.str, builtins.str] = ...) -> Query_65f4a42ff09e715425bfa54a353b03fb: ...
 @overload
-def mydb_sql(sql: Literal['\n        SELECT status, count(*) AS task_count\n        FROM tasks WHERE project_id = @project_id\n        GROUP BY status ORDER BY status\n        '], row_type: Literal['TaskStatusCount']) -> Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount: ...
+def mydb_sql(sql: Literal['\n        SELECT status, count(*) AS task_count\n        FROM tasks WHERE project_id = @project_id\n        GROUP BY status ORDER BY status\n        '], row_type: Literal['TaskStatusCount'], *, json_model_overrides: builtins.dict[builtins.str, builtins.str] = ...) -> Query_cabe6d4d91163f6aadc739bf765777db_TaskStatusCount: ...
 @overload
-def mydb_sql(sql: Literal['SELECT id FROM tasks WHERE project_id = @project_id AND title = @title']) -> Query_07cbb3e5226e35adbd17171f38ab7216: ...
+def mydb_sql(sql: Literal["\n        SELECT projects.id, projects.name, coalesce(\n            (SELECT json_agg(tasks ORDER BY tasks.title) FROM tasks WHERE tasks.project_id = projects.id),\n            '[]'::json\n        ) AS tasks\n        FROM projects\n        WHERE projects.owner_id = @owner_id\n        "], *, json_model_overrides: builtins.dict[builtins.str, builtins.str] = ...) -> Query_ec08492bab8a1de35f0bccd927805a9b: ...
 @overload
-def mydb_sql(sql: Literal['SELECT count(*) FROM tasks WHERE status = @status']) -> Query_29c838280e39383dd6b0760431eb3e60: ...
+def mydb_sql(sql: Literal['SELECT id FROM tasks WHERE project_id = @project_id AND title = @title'], *, json_model_overrides: builtins.dict[builtins.str, builtins.str] = ...) -> Query_07cbb3e5226e35adbd17171f38ab7216: ...
+@overload
+def mydb_sql(sql: Literal['SELECT count(*) FROM tasks WHERE status = @status'], *, json_model_overrides: builtins.dict[builtins.str, builtins.str] = ...) -> Query_29c838280e39383dd6b0760431eb3e60: ...
 @overload
 def mydb_sql(sql: builtins.str) -> Query[Any]: ...
 
@@ -357,6 +392,8 @@ def mydb_sql(sql: builtins.str) -> Query[Any]: ...
 def mydb_sql(
     sql: builtins.str,
     row_type: builtins.str | None = None,
+    *,
+    json_model_overrides: builtins.dict[builtins.str, builtins.str] | None = None,
 ) -> Query[Any]:
     if sql in _QUERIES:
         return _QUERIES[sql]()

@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 _USER_METADATA_REF = JSONModelRef(
     module_path="tests",
-    class_path="json_models.UserMetadata",
+    type_path="json_models.UserMetadata",
     origin="test JSON model",
 )
 

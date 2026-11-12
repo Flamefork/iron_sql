@@ -1,3 +1,5 @@
+import uuid
+
 from pydantic import BaseModel
 from pydantic import Field
 
@@ -10,3 +12,11 @@ class ProjectSettings(BaseModel):
 class TaskMetadata(BaseModel):
     tags: list[str] = Field(default_factory=list)
     estimated_hours: float | None = None
+
+
+class TaskSummary(BaseModel):
+    id: uuid.UUID
+    title: str
+
+
+type TaskSummaryList = list[TaskSummary]

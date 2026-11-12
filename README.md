@@ -80,11 +80,62 @@ A 1+N pattern is therefore never implicit: it is always a loop in your own code 
 
 ## Customization
 - **Type overrides.** `type_overrides={"float8": "decimal.Decimal"}` maps database type names to Python type strings. For built-in types the key is the PostgreSQL internal name (`float8`, `varchar`, `timestamptz`), not the SQL-standard spelling (`double precision`, `character varying`); for a user-defined enum, domain or extension type it is the type name as declared (`custom_int`, `citext`). A key that no query column or parameter uses raises `SQLGenerationError` listing the type names actually in use.
-- **JSON model overrides.** `json_model_overrides={"users.metadata": "myapp.models:UserMeta"}` adds Pydantic validation for JSON/JSONB columns.
+- **JSON model overrides.** `json_model_overrides={"users.metadata": "myapp.models:UserMeta"}` types a json, jsonb, text or varchar column of a table and validates it with Pydantic on read; the same option on a `*_sql(...)` call types a result column of that query. See [JSON Columns](#json-columns).
 - **Naming conventions.** Supply `to_pascal_fn` and `to_snake_fn` callables to control generated names.
 - **Connection settings.** `dsn_expr` and `pool_options_expr` are written verbatim into the generated module; point them at config variables, env var lookups, or function calls. The generator also imports the module and evaluates the expression: `dsn_expr` must evaluate to `str`, `pool_options_expr` to `dict`. An exception raised by that import or evaluation propagates with its own type and traceback; a note names the setting and the expression.
 - **Session settings and timeouts.** `PoolOptions["kwargs"]` reaches every pooled connection, so libpq `options` carries server-side settings: `{"kwargs": {"options": "-c statement_timeout=5000 -c lock_timeout=1000"}}`. `statement_timeout` bounds a single statement, not a query method: a `query_stream()` that iterates for longer than the timeout is unaffected, because `DECLARE` and each `FETCH` count separately. Consider `idle_in_transaction_session_timeout` alongside them to bound transactions that stay open while the application is busy elsewhere.
 - **Debug artifacts.** Pass `debug_path` to save sqlc inputs and outputs for inspection. The generator also writes each refused directory and its reason to `skipped_dirs.json`.
+
+## JSON Columns
+
+A json, jsonb, text or varchar column can carry a Python type, written `module:Name`: a Pydantic model, a type alias such as `TaskList = list[Task]` or `type TaskList = list[Task]`, or a builtin such as `builtins:int`. The field annotation and the validation on read use that one type. json and jsonb values arrive decoded, so a JSON string reads as `str`; text and varchar values are parsed as JSON text.
+
+```python
+from uuid import UUID
+
+from pydantic import BaseModel
+
+
+class ProjectSettings(BaseModel):
+    archived: bool = False
+
+
+class Task(BaseModel):
+    id: UUID
+    title: str
+
+
+type TaskList = list[Task]
+```
+
+`render_sql_module(json_model_overrides={"table.column": "module:Name"})` types a column of a table wherever a query returns it. A computed column -- `json_agg`, `to_jsonb`, `json_build_object`, a subquery with them -- belongs to no table, so the call that runs the query types it: the key is the result column name as the SQL spells it, after `AS`.
+
+```python
+projects = await mydb_sql(
+    """
+    SELECT projects.id, projects.settings, coalesce(
+        (SELECT json_agg(tasks ORDER BY tasks.title)
+        FROM tasks WHERE tasks.project_id = projects.id),
+        '[]'::json
+    ) AS tasks
+    FROM projects
+    """,
+    json_model_overrides={"tasks": "myapp.models:TaskList"},
+).query_all_rows()
+```
+
+```python
+render_sql_module(
+    schema_path=Path("schema.sql"),
+    module_full_name="myapp.db.mydb",
+    dsn_expr="myapp.config:DSN",
+    json_model_overrides={"projects.settings": "myapp.models:ProjectSettings"},
+).write()
+```
+
+- The setting on the call wins over the table setting for that result column. Every call of the same SQL must pass the same `json_model_overrides`.
+- Nullability follows sqlc. A bare `(SELECT json_agg(...))` is typed non-null, yet PostgreSQL returns `NULL` for an empty set, and reading that `NULL` raises. Wrap it in `coalesce(..., '[]'::json)`: sqlc then types the column as nullable, and the query never returns `NULL`.
+- Without a DSN sqlc may not infer the type of an expression such as `coalesce(...)`; the generator rejects an override on such a column. Cast the expression (`::json`, `::jsonb`) or generate with a DSN.
 
 ## Runtime Highlights
 - `ConnectionPool` opens lazily and reopens after `close()`, with `ContextVar`-based connection reuse for nested contexts.
@@ -94,7 +145,7 @@ A 1+N pattern is therefore never implicit: it is always a loop in your own code 
 - `query_single_row()` raises `NoRowsError`; `query_optional_row()` returns `None`. Both raise `TooManyRowsError` on 2+ rows.
 - `query_stream()` returns an async context manager yielding an `AsyncGenerator`; uses server-side cursors with automatic transaction management.
 - JSONB params are sent with `psycopg.types.json.Jsonb`; JSON with `psycopg.types.json.Json`. Scalar row factories validate types at runtime.
-- `json_validated` decorator applies Pydantic model validation to dataclass fields on construction.
+- `json_validated` decorator validates JSON fields of a result dataclass on construction; `typed_json_scalar_row` validates a single JSON result column.
 - `detect_sql_repeats()` reports accidental 1+N loops; see [below](#detecting-accidental-1n).
 
 ## Detecting Accidental 1+N
