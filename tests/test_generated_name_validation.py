@@ -15,6 +15,7 @@ import pytest
 from pydantic import BaseModel
 from pydantic import alias_generators
 
+from iron_sql.codegen import SQLGenerationError
 from iron_sql.codegen import render_sql_module
 from iron_sql.codegen.generator import ColumnSpec
 from iron_sql.codegen.generator import JSONModelRef
@@ -70,7 +71,7 @@ q2 = testdb_sql("UPDATE users SET username = @self")
     )
 
     with pytest.raises(
-        ValueError, match=r"^Invalid generated Python names:"
+        SQLGenerationError, match=r"^Invalid generated Python names:"
     ) as exc_info:
         test_project.generate_no_import()
 
@@ -109,7 +110,7 @@ def test_parameter_collides_only_with_external_names_read_by_method(
     test_project.add_query("q", sql)
 
     with pytest.raises(
-        ValueError, match=r"^Invalid generated Python names:"
+        SQLGenerationError, match=r"^Invalid generated Python names:"
     ) as exc_info:
         test_project.generate_no_import(json_model_overrides=overrides)
 
@@ -127,7 +128,7 @@ def test_json_module_root_cannot_replace_generated_module_binding(
     test_project.add_query("q", "UPDATE users SET metadata = $1")
 
     with pytest.raises(
-        ValueError, match=r"^Invalid generated Python names:"
+        SQLGenerationError, match=r"^Invalid generated Python names:"
     ) as exc_info:
         test_project.generate_no_import(
             json_model_overrides={"users.metadata": "runtime.models:Payload"}
@@ -146,7 +147,7 @@ def test_json_module_root_cannot_be_shadowed_by_parameter(
     test_project.add_query("q", "UPDATE users SET metadata = @tests")
 
     with pytest.raises(
-        ValueError, match=r"^Invalid generated Python names:"
+        SQLGenerationError, match=r"^Invalid generated Python names:"
     ) as exc_info:
         test_project.generate_no_import(
             json_model_overrides={"users.metadata": "tests.json_models:UserMetadata"}
@@ -185,7 +186,7 @@ def test_json_module_root_cannot_be_shadowed_by_cursor_local(
     test_project.add_query("q", sql)
 
     with pytest.raises(
-        ValueError, match=r"^Invalid generated Python names:"
+        SQLGenerationError, match=r"^Invalid generated Python names:"
     ) as exc_info:
         test_project.generate_no_import(
             json_model_overrides={"users.metadata": "cur.models:Payload"}
@@ -248,7 +249,7 @@ def test_module_implicit_annotations_binding_is_reserved(
     )
 
     with pytest.raises(
-        ValueError, match=r"^Invalid generated Python names:"
+        SQLGenerationError, match=r"^Invalid generated Python names:"
     ) as exc_info:
         test_project.generate_no_import()
 
@@ -266,7 +267,7 @@ def test_transaction_state_helper_name_is_reserved(
     )
 
     with pytest.raises(
-        ValueError, match=r"^Invalid generated Python names:"
+        SQLGenerationError, match=r"^Invalid generated Python names:"
     ) as exc_info:
         test_project.generate_no_import()
 
@@ -292,7 +293,7 @@ q = testdb_sql(
     )
 
     with pytest.raises(
-        ValueError, match=r"^Invalid generated Python names:"
+        SQLGenerationError, match=r"^Invalid generated Python names:"
     ) as exc_info:
         test_project.generate_no_import()
 
@@ -317,7 +318,7 @@ q2 = testdb_sql("SELECT users.* FROM users", row_type="Query")
     )
 
     with pytest.raises(
-        ValueError, match=r"^Invalid generated Python names:"
+        SQLGenerationError, match=r"^Invalid generated Python names:"
     ) as exc_info:
         test_project.generate_no_import()
 
@@ -345,7 +346,7 @@ def test_custom_class_names_validate_entities_and_enums(
         return alias_generators.to_pascal(value)
 
     with pytest.raises(
-        ValueError, match=r"^Invalid generated Python names:"
+        SQLGenerationError, match=r"^Invalid generated Python names:"
     ) as exc_info:
         test_project.generate_no_import(to_pascal_fn=custom_to_pascal)
 
@@ -379,7 +380,7 @@ q2 = testdb_sql(
     )
 
     with pytest.raises(
-        ValueError, match=r"^Invalid generated Python names:"
+        SQLGenerationError, match=r"^Invalid generated Python names:"
     ) as exc_info:
         test_project.generate_no_import()
 
@@ -388,6 +389,11 @@ q2 = testdb_sql(
     assert "'bad-name' is not a valid Python identifier" in message
     assert "'duplicate' is claimed more than once" in message
     assert "'Query' is claimed more than once" in message
+    rename_hint = (
+        "Rename the listed origins so that each generated name is a distinct "
+        "Python identifier, unchanged by NFKC normalization and name mangling"
+    )
+    assert message.endswith(rename_hint)
     assert not target_path.exists()
 
 
@@ -412,7 +418,7 @@ q = testdb_sql(
 """
     )
 
-    with pytest.raises(ValueError, match=r"^Invalid generated Python names:"):
+    with pytest.raises(SQLGenerationError, match=r"^Invalid generated Python names:"):
         test_project.generate_no_import()
 
     assert target_path.read_text(encoding="utf-8") == original
@@ -422,7 +428,7 @@ def test_parameter_name_keeps_dollar_sign(test_project: ProjectBuilder) -> None:
     test_project.add_query("q", "UPDATE users SET username = @a$b")
 
     with pytest.raises(
-        ValueError, match=r"^Invalid generated Python names:"
+        SQLGenerationError, match=r"^Invalid generated Python names:"
     ) as exc_info:
         test_project.generate_no_import()
 
@@ -445,7 +451,7 @@ def test_nfkc_unstable_generated_names_are_rejected(
 ) -> None:
     test_project.add_query("q", sql)
 
-    with pytest.raises(ValueError, match=r"^Invalid generated Python names:"):
+    with pytest.raises(SQLGenerationError, match=r"^Invalid generated Python names:"):
         test_project.generate_no_import()
 
 
@@ -455,7 +461,7 @@ def test_nfkc_collision_reports_original_spellings(
     test_project.add_query("q", 'SELECT username AS "K", email AS "K" FROM users')
 
     with pytest.raises(
-        ValueError, match=r"^Invalid generated Python names:"
+        SQLGenerationError, match=r"^Invalid generated Python names:"
     ) as exc_info:
         test_project.generate_no_import()
 
@@ -475,7 +481,7 @@ def test_nfkc_unstable_row_type_is_rejected(
     )
 
     with pytest.raises(
-        ValueError, match=r"^Invalid generated Python names:"
+        SQLGenerationError, match=r"^Invalid generated Python names:"
     ) as exc_info:
         test_project.generate_no_import()
 
@@ -499,7 +505,7 @@ def test_nfkc_unstable_custom_class_names_are_rejected(
         return alias_generators.to_pascal(value)
 
     with pytest.raises(
-        ValueError, match=r"^Invalid generated Python names:"
+        SQLGenerationError, match=r"^Invalid generated Python names:"
     ) as exc_info:
         test_project.generate_no_import(to_pascal_fn=custom_to_pascal)
 
@@ -537,7 +543,7 @@ def test_generated_class_binding_name_envelope(
     if accepted:
         test_project.generate(to_pascal_fn=custom_to_pascal)
         return
-    with pytest.raises(ValueError, match=r"^Invalid generated Python names:"):
+    with pytest.raises(SQLGenerationError, match=r"^Invalid generated Python names:"):
         test_project.generate_no_import(to_pascal_fn=custom_to_pascal)
 
 
@@ -568,7 +574,7 @@ def test_explicit_row_type_name_envelope(
         generated_class = cast("object", vars(module)[row_type])
         assert inspect.isclass(generated_class)
         return
-    with pytest.raises(ValueError, match=r"^Invalid generated Python names:"):
+    with pytest.raises(SQLGenerationError, match=r"^Invalid generated Python names:"):
         test_project.generate_no_import()
 
 
@@ -587,7 +593,7 @@ def test_class_scope_unsafe_names_are_rejected(
 ) -> None:
     test_project.add_query("q", sql)
 
-    with pytest.raises(ValueError, match=r"^Invalid generated Python names:"):
+    with pytest.raises(SQLGenerationError, match=r"^Invalid generated Python names:"):
         test_project.generate_no_import()
 
 
@@ -621,7 +627,7 @@ def test_json_override_validates_every_dotted_path_component(
     test_project.add_query("q", "SELECT 1")
 
     with pytest.raises(
-        ValueError, match=r"^Invalid generated Python names:"
+        SQLGenerationError, match=r"^Invalid generated Python names:"
     ) as exc_info:
         test_project.generate_no_import(
             json_model_overrides={
@@ -662,7 +668,7 @@ def test_module_expression_validates_every_module_component(
     pool_options_expr = (
         "bad-model:POOL_OPTIONS" if expression_kind == "pool_options" else None
     )
-    with pytest.raises(ValueError, match="'bad-model'"):
+    with pytest.raises(SQLGenerationError, match="'bad-model'"):
         render_sql_module(
             schema_path=Path("schema.sql"),
             module_full_name=test_project.module_full_name,
@@ -705,7 +711,7 @@ async def test_generated_enum_members_are_validated_after_rendering_names(
     )
 
     with pytest.raises(
-        ValueError, match=r"^Invalid generated Python names:"
+        SQLGenerationError, match=r"^Invalid generated Python names:"
     ) as exc_info:
         test_project.generate_no_import()
 
@@ -734,7 +740,7 @@ q = class_sql("SELECT 1")
     target_path = test_project.src_path / f"{invalid_module_name.replace('.', '/')}.py"
 
     with pytest.raises(
-        ValueError, match=r"^Invalid generated Python names:"
+        SQLGenerationError, match=r"^Invalid generated Python names:"
     ) as exc_info:
         render_sql_module(
             schema_path=Path("schema.sql"),
@@ -789,7 +795,6 @@ def test_renderer_owned_builtin_reads_are_qualified(
                     is_named=False,
                     db_type="text",
                     not_null=True,
-                    is_array=False,
                 )
             ],
             "ResultRow",
@@ -806,7 +811,6 @@ def test_renderer_owned_builtin_reads_are_qualified(
                     is_named=False,
                     db_type="jsonb",
                     not_null=True,
-                    is_array=False,
                     json_model=_USER_METADATA_REF,
                 )
             ],
@@ -912,7 +916,7 @@ def test_earlier_query_class_binding_cannot_shadow_result_type(
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
     )
 
-    with pytest.raises(ValueError, match=f"class .*{row_type!r}") as exc_info:
+    with pytest.raises(SQLGenerationError, match=f"class .*{row_type!r}") as exc_info:
         test_project.generate_no_import()
 
     message = str(exc_info.value)
@@ -953,7 +957,7 @@ def test_module_expression_walrus_binding_conflict_is_rejected_before_write(
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
     )
 
-    with pytest.raises(ValueError, match="TESTDB_POOL"):
+    with pytest.raises(SQLGenerationError, match="TESTDB_POOL"):
         render_sql_module(
             schema_path=Path("schema.sql"),
             module_full_name=test_project.module_full_name,
@@ -1093,7 +1097,7 @@ def test_module_expression_binding_conflicts_with_second_expression(
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
 
-    with pytest.raises(ValueError, match="selected"):
+    with pytest.raises(SQLGenerationError, match="selected"):
         render_sql_module(
             schema_path=Path("schema.sql"),
             module_full_name=test_project.module_full_name,
@@ -1118,7 +1122,7 @@ def test_module_expression_binding_reports_original_nfkc_spelling(
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
 
-    with pytest.raises(ValueError, match="'K' is normalized by Python to 'K'"):
+    with pytest.raises(SQLGenerationError, match="'K' is normalized by Python to 'K'"):
         render_sql_module(
             schema_path=Path("schema.sql"),
             module_full_name=test_project.module_full_name,
@@ -1140,7 +1144,7 @@ def test_module_expression_read_reports_original_nfkc_spelling(
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
 
-    with pytest.raises(ValueError, match="'K' is normalized by Python to 'K'"):
+    with pytest.raises(SQLGenerationError, match="'K' is normalized by Python to 'K'"):
         render_sql_module(
             schema_path=Path("schema.sql"),
             module_full_name=test_project.module_full_name,

@@ -61,8 +61,12 @@ def test_scanner_rejects_syntax_error(test_project: ProjectBuilder) -> None:
         def broken(
         """
     )
-    with pytest.raises(SyntaxError, match=r"Failed to parse .+queries\.py"):
+    with pytest.raises(
+        SQLGenerationError, match=r"queries\.py:\d+:\d+: Python syntax error"
+    ) as exc_info:
         test_project.generate_no_import()
+
+    assert isinstance(exc_info.value.__cause__, SyntaxError)
 
 
 def test_scanner_rejects_non_literal_sql(test_project: ProjectBuilder) -> None:
@@ -75,7 +79,10 @@ def test_scanner_rejects_non_literal_sql(test_project: ProjectBuilder) -> None:
         q = testdb_sql(SQL)
         """
     )
-    with pytest.raises(TypeError, match="expected a single string literal"):
+    with pytest.raises(
+        SQLGenerationError,
+        match=r"queries\.py:\d+:\d+: the SQL argument must be a single positional",
+    ):
         test_project.generate_no_import()
 
 
@@ -89,7 +96,10 @@ def test_scanner_rejects_non_literal_row_type(test_project: ProjectBuilder) -> N
         q = testdb_sql("SELECT 1", row_type=RT)
         """
     )
-    with pytest.raises(TypeError, match="expected a string literal"):
+    with pytest.raises(
+        SQLGenerationError,
+        match=r"queries\.py:\d+:\d+: row_type must be a string literal",
+    ):
         test_project.generate_no_import()
 
 
@@ -102,29 +112,32 @@ def test_scanner_rejects_wrong_call_shape(test_project: ProjectBuilder) -> None:
         testdb_sql("SELECT 1", "extra")
         """
     )
-    with pytest.raises(TypeError, match="expected a single string literal"):
+    with pytest.raises(
+        SQLGenerationError,
+        match=r"queries\.py:\d+:\d+: the SQL argument must be a single positional",
+    ):
         test_project.generate_no_import()
 
 
 @pytest.mark.parametrize(
     ("call", "message"),
     [
-        ("testdb_sql()", "Invalid positional arguments"),
+        ("testdb_sql()", "the SQL argument must be a single positional"),
         (
             'testdb_sql("SELECT 1", unknown="value")',
-            "Invalid keyword argument 'unknown'",
+            "unsupported keyword argument 'unknown'",
         ),
         (
             'testdb_sql("SELECT 1", row_type="First", row_type="Second")',
-            "Invalid keyword arguments",
+            "more than one keyword argument",
         ),
         (
             'testdb_sql("SELECT 1", row_type="First", unknown="value")',
-            "Invalid keyword arguments",
+            "more than one keyword argument",
         ),
         (
             'testdb_sql("SELECT 1", **{"row_type": "Result"})',
-            "Invalid keyword argument \\*\\*kwargs",
+            "unsupported keyword argument \\*\\*kwargs",
         ),
     ],
 )
@@ -141,10 +154,11 @@ def testdb_sql(q: str, **kwargs: Any) -> Any: ...
 """
     test_project.set_queries_source(source)
 
-    with pytest.raises(TypeError, match=message) as exc_info:
+    with pytest.raises(SQLGenerationError, match=message) as exc_info:
         test_project.generate_no_import()
 
-    assert "queries.py:4" in str(exc_info.value)
+    assert "queries.py:4:1: " in str(exc_info.value)
+    assert "expected testdb_sql(<SQL string literal>)" in str(exc_info.value)
 
 
 def test_scanner_rejects_same_stmt_different_row_type(
@@ -160,7 +174,8 @@ q2 = testdb_sql("SELECT id, username FROM users")
     )
 
     with pytest.raises(
-        ValueError, match=r"row_type conflict: .+:4 has 'UserMini', .+:5 has None"
+        SQLGenerationError,
+        match=r"row_type conflict for the same SQL: .+:4 has 'UserMini', .+:5 has None",
     ):
         test_project.generate_no_import()
 
@@ -182,7 +197,7 @@ q2 = testdb_sql("SELECT id, username FROM users", row_type="UserMini")
 
 def test_sqlc_failure_raises(test_project: ProjectBuilder) -> None:
     test_project.add_query("bad_query", "SELEC FROM users")
-    with pytest.raises(SQLGenerationError, match="Error running SQLC"):
+    with pytest.raises(SQLGenerationError, match="sqlc exited with errors"):
         test_project.generate_no_import()
 
 
@@ -232,7 +247,7 @@ def test_unterminated_non_code_text_reaches_sqlc(
 ) -> None:
     test_project.add_query("q", sql)
 
-    with pytest.raises(SQLGenerationError, match=r"^Error running SQLC"):
+    with pytest.raises(SQLGenerationError, match=r"^sqlc exited with errors"):
         test_project.generate_no_import()
 
 
@@ -296,13 +311,19 @@ def test_result_shapes_validation_error_zero_cols(test_project: ProjectBuilder) 
     test_project.add_query(
         "insert_bad", "INSERT INTO users (id, username) VALUES ($1, $2)", row_type="Bad"
     )
-    with pytest.raises(ValueError, match="Query has row_type=Bad but no result"):
+    with pytest.raises(
+        SQLGenerationError,
+        match=r"queries\.py:\d+: row_type='Bad' .* returns no result columns",
+    ):
         test_project.generate_no_import()
 
 
 def test_result_shapes_validation_error_one_col(test_project: ProjectBuilder) -> None:
     test_project.add_query("select_bad", "SELECT id FROM users", row_type="Bad2")
-    with pytest.raises(ValueError, match="Query has row_type=Bad2 but only one column"):
+    with pytest.raises(
+        SQLGenerationError,
+        match=r"queries\.py:\d+: row_type='Bad2' .* returns one result column",
+    ):
         test_project.generate_no_import()
 
 
@@ -338,7 +359,6 @@ def test_json_model_param_serialized_expr_uses_direct_db_type_mapping(
             is_named=False,
             db_type=db_type,
             not_null=True,
-            is_array=False,
             json_model=_USER_METADATA_REF,
         ).serialized_expr
         == expected
@@ -353,7 +373,6 @@ def test_nullable_json_model_param_serialized_expr_keeps_none() -> None:
             is_named=False,
             db_type="jsonb",
             not_null=False,
-            is_array=False,
             json_model=_USER_METADATA_REF,
         ).serialized_expr
         == _NULLABLE_JSONB_METADATA_EXPR
@@ -364,7 +383,13 @@ def test_unsupported_param_types_array(test_project: ProjectBuilder) -> None:
     test_project.add_query(
         "bad_jsonb_array", "INSERT INTO jsonb_arrays (payloads) VALUES ($1)"
     )
-    with pytest.raises(TypeError, match=r"Unsupported column type: jsonb\[\]"):
+    with pytest.raises(
+        SQLGenerationError,
+        match=(
+            r"does not support jsonb\[\] query parameters:\n- .*queries\.py:\d+: "
+            r"parameter 'payloads' has type jsonb\[\]"
+        ),
+    ):
         test_project.generate_no_import()
 
 
@@ -447,7 +472,9 @@ def get_dsn() -> str:
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
 
-    expr_ref = ModuleExprRef.parse(f"{test_project.app_pkg}.config:get_dsn()")
+    expr_ref = ModuleExprRef.parse(
+        "dsn_expr", f"{test_project.app_pkg}.config:get_dsn()"
+    )
 
     assert expr_ref.module_name == f"{test_project.app_pkg}.config"
     assert expr_ref.module_expr == "get_dsn()"
@@ -463,7 +490,7 @@ def test_module_expr_ref_allows_literal_expression(
         sys.path.insert(0, str(test_project.src_path))
 
     expr_ref = ModuleExprRef.parse(
-        f"{test_project.app_pkg}.config:{test_project.dsn!r}"
+        "dsn_expr", f"{test_project.app_pkg}.config:{test_project.dsn!r}"
     )
 
     assert expr_ref.import_names == ()
@@ -570,8 +597,8 @@ def test_module_expression_imports_names_read_by_lambda_defaults(
 @pytest.mark.parametrize(
     ("dsn_expr", "message"),
     [
-        ("config.DSN", "module expression must be 'module:expr'"),
-        ("config:DSN[", "invalid module expression"),
+        ("config.DSN", "dsn_expr='config.DSN': expected 'module:expr'"),
+        ("config:DSN[", r"dsn_expr='config:DSN\[': expression 'DSN\[' is not valid"),
     ],
 )
 def test_invalid_dsn_expression_fails_before_generation(
@@ -582,7 +609,7 @@ def test_invalid_dsn_expression_fails_before_generation(
     test_project.add_query("q", "SELECT 1")
     test_project.write_queries()
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(SQLGenerationError, match=message):
         render_sql_module(
             schema_path=Path("schema.sql"),
             module_full_name=test_project.module_full_name,
@@ -595,13 +622,21 @@ def test_invalid_dsn_expression_fails_before_generation(
 def test_dsn_expression_rejects_non_string_value(
     test_project: ProjectBuilder,
 ) -> None:
-    (test_project.app_dir / "config.py").write_text("DSN = 42\n", encoding="utf-8")
+    (test_project.app_dir / "config.py").write_text(
+        'DSN = b"postgresql://app:hunter2@db/app"\n', encoding="utf-8"
+    )
     test_project.add_query("q", "SELECT 1")
     test_project.write_queries()
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
 
-    with pytest.raises(TypeError, match="must evaluate to str, got: int"):
+    with pytest.raises(
+        SQLGenerationError,
+        match=(
+            r"dsn_expr='.+\.config:DSN': the expression must evaluate to str, "
+            r"got bytes"
+        ),
+    ) as exc_info:
         render_sql_module(
             schema_path=Path("schema.sql"),
             module_full_name=test_project.module_full_name,
@@ -609,6 +644,32 @@ def test_dsn_expression_rejects_non_string_value(
             src_path=test_project.src_path,
             tempdir_path=test_project.src_path,
         ).write()
+
+    assert "hunter2" not in str(exc_info.value)
+
+
+def test_dsn_expression_missing_module_keeps_import_error(
+    test_project: ProjectBuilder,
+) -> None:
+    test_project.add_query("q", "SELECT 1")
+    test_project.write_queries()
+
+    with pytest.raises(ModuleNotFoundError) as exc_info:
+        render_sql_module(
+            schema_path=Path("schema.sql"),
+            module_full_name=test_project.module_full_name,
+            dsn_expr="missing_settings_module:DSN",
+            src_path=test_project.src_path,
+            tempdir_path=test_project.src_path,
+        ).write()
+
+    assert exc_info.value.name == "missing_settings_module"
+    assert exc_info.value.__notes__ == [
+        (
+            "while importing module 'missing_settings_module' of "
+            "dsn_expr='missing_settings_module:DSN'"
+        )
+    ]
 
 
 def test_dsn_expr_with_factory_call_generates_valid_python(
@@ -724,15 +785,20 @@ def test_pool_options_expr_invalid_fails_during_generation(
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
 
-    with pytest.raises(NameError, match="MISSING_POOL_OPTIONS"):
+    pool_options_expr = f"{test_project.app_pkg}.config:MISSING_POOL_OPTIONS"
+    with pytest.raises(NameError, match="MISSING_POOL_OPTIONS") as exc_info:
         render_sql_module(
             schema_path=Path("schema.sql"),
             module_full_name=test_project.module_full_name,
             dsn_expr=f"{test_project.app_pkg}.config:DSN",
-            pool_options_expr=f"{test_project.app_pkg}.config:MISSING_POOL_OPTIONS",
+            pool_options_expr=pool_options_expr,
             src_path=test_project.src_path,
             tempdir_path=test_project.src_path,
         ).write()
+
+    assert exc_info.value.__notes__ == [
+        f"while evaluating pool_options_expr={pool_options_expr!r}"
+    ]
 
     generated_path = (
         test_project.src_path / f"{test_project.module_full_name.replace('.', '/')}.py"
@@ -752,7 +818,10 @@ def test_pool_options_expression_rejects_non_dict_value(
     if str(test_project.src_path) not in sys.path:
         sys.path.insert(0, str(test_project.src_path))
 
-    with pytest.raises(TypeError, match="must evaluate to dict, got: list"):
+    with pytest.raises(
+        SQLGenerationError,
+        match=r"pool_options_expr='.+': the expression must evaluate to dict, got list",
+    ):
         render_sql_module(
             schema_path=Path("schema.sql"),
             module_full_name=test_project.module_full_name,
@@ -803,12 +872,28 @@ def test_package_is_marked_as_typed() -> None:
     assert importlib.resources.files("iron_sql").joinpath("py.typed").is_file()
 
 
-def test_run_sqlc_missing_schema() -> None:
-    with pytest.raises(ValueError, match="Schema file not found"):
-        run_sqlc(
+def test_missing_schema_file_names_the_path(test_project: ProjectBuilder) -> None:
+    (test_project.app_dir / "config.py").write_text(
+        f'DSN = "{test_project.dsn}"\n', encoding="utf-8"
+    )
+    test_project.add_query("q", "SELECT 1")
+    test_project.write_queries()
+    if str(test_project.src_path) not in sys.path:
+        sys.path.insert(0, str(test_project.src_path))
+
+    with pytest.raises(
+        SQLGenerationError,
+        match=(
+            r"schema_path: schema file not found: .+nonexistent\.sql; "
+            r"schema_path is resolved against src_path"
+        ),
+    ):
+        render_sql_module(
             schema_path=Path("nonexistent.sql"),
-            queries=[],
-            dsn="postgres://",
+            module_full_name=test_project.module_full_name,
+            dsn_expr=f"{test_project.app_pkg}.config:DSN",
+            src_path=test_project.src_path,
+            tempdir_path=test_project.src_path,
         )
 
 

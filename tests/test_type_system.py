@@ -4,6 +4,7 @@ import datetime
 import decimal
 import inspect
 import ipaddress
+import re
 import warnings
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -13,6 +14,7 @@ from typing import get_args
 
 import pytest
 
+from iron_sql.codegen import SQLGenerationError
 from iron_sql.codegen import UnknownSQLTypeWarning
 from iron_sql.runtime import ConnectionPool
 
@@ -533,6 +535,99 @@ async def test_cross_schema_enum_type_annotation(
     assert fields["mood"] is happy
 
 
+_UNDECLARED_SCHEMA_ERROR = (
+    r"Query types come from schemas that schema_path does not declare:\n"
+    r"- .*queries\.py:\d+: {position} has type other\.mood from schema 'other'\n"
+    r"sqlc infers query types from the database at dsn but looks them up in "
+    r"schema_path; declare these schemas and their types in schema_path"
+)
+
+
+async def _create_enum_in_database_only(test_project: ProjectBuilder) -> None:
+    await test_project.execute_in_database("""
+    CREATE SCHEMA other;
+    CREATE TYPE other.mood AS ENUM ('happy', 'sad');
+    """)
+
+
+async def test_result_column_type_from_undeclared_schema_rejected(
+    test_project: ProjectBuilder,
+) -> None:
+    await _create_enum_in_database_only(test_project)
+    test_project.add_query("get_mood", "SELECT 'happy'::other.mood AS m")
+
+    with pytest.raises(
+        SQLGenerationError,
+        match=_UNDECLARED_SCHEMA_ERROR.format(position="result column 'm'"),
+    ) as exc_info:
+        test_project.generate_no_import()
+
+    assert test_project.dsn not in str(exc_info.value)
+
+
+async def test_parameter_type_from_undeclared_schema_rejected(
+    test_project: ProjectBuilder,
+) -> None:
+    await _create_enum_in_database_only(test_project)
+    test_project.add_query(
+        "count_moods", "SELECT count(*) AS n WHERE @m::other.mood = 'happy'"
+    )
+
+    with pytest.raises(
+        SQLGenerationError,
+        match=_UNDECLARED_SCHEMA_ERROR.format(position="parameter 'm'"),
+    ):
+        test_project.generate_no_import()
+
+
+async def test_undeclared_schema_issues_listed_together_with_all_locations(
+    test_project: ProjectBuilder,
+) -> None:
+    await _create_enum_in_database_only(test_project)
+    sql = "SELECT @m::other.mood AS m"
+    test_project.add_query("first", sql)
+    test_project.add_query("second", sql)
+
+    with pytest.raises(SQLGenerationError) as exc_info:
+        test_project.generate_no_import()
+
+    issue_lines = [
+        line for line in str(exc_info.value).splitlines() if line.startswith("- ")
+    ]
+    location = r".*queries\.py:\d+"
+    issue = r"has type other\.mood from schema 'other'"
+    assert len(issue_lines) == 2
+    for line, position in zip(
+        issue_lines, ("result column 'm'", "parameter 'm'"), strict=True
+    ):
+        assert re.fullmatch(rf"- {location}, {location}: {position} {issue}", line)
+
+
+async def test_overridden_type_from_undeclared_schema_rejected(
+    test_project: ProjectBuilder,
+) -> None:
+    await _create_enum_in_database_only(test_project)
+    test_project.add_query("get_mood", "SELECT 'happy'::other.mood AS m")
+
+    with pytest.raises(
+        SQLGenerationError,
+        match=_UNDECLARED_SCHEMA_ERROR.format(position="result column 'm'"),
+    ):
+        test_project.generate_no_import(type_overrides={"mood": "builtins.str"})
+
+
+async def test_information_schema_type_resolves(
+    test_project: ProjectBuilder,
+) -> None:
+    sql = "SELECT @name::information_schema.sql_identifier AS table_name"
+    test_project.add_query("get_table_name", sql)
+
+    mod = test_project.generate(type_overrides={"sql_identifier": "builtins.str"})
+
+    row = await query_single_row(mod, sql, name="users")
+    assert row == "users"
+
+
 async def test_pg_catalog_type_does_not_break_generation(
     test_project: ProjectBuilder,
 ) -> None:
@@ -979,20 +1074,34 @@ async def test_type_overrides_reject_unused_type_name(
         "get_value", "SELECT measurements.value as v FROM measurements"
     )
 
-    with pytest.raises(ValueError, match="double precision") as excinfo:
+    with pytest.raises(
+        SQLGenerationError,
+        match=r"type_overrides keys 'double precision': no query column or parameter",
+    ) as excinfo:
         test_project.generate(type_overrides={"double precision": "float"})
 
     assert "float8" in str(excinfo.value)
 
 
-@pytest.mark.parametrize("expression", ["bad-name", "missing.Type", "list["])
+@pytest.mark.parametrize(
+    ("expression", "message"),
+    [
+        ("bad-name", "the generated module does not bind bad, name"),
+        ("missing.Type", "the generated module does not bind missing"),
+        ("list[", "not a valid Python expression"),
+    ],
+)
 def test_type_overrides_reject_invalid_python_expression(
     test_project: ProjectBuilder,
     expression: str,
+    message: str,
 ) -> None:
     test_project.add_query("q", "SELECT 1::float8 AS value")
 
-    with pytest.raises(ValueError, match="type_overrides expression"):
+    with pytest.raises(
+        SQLGenerationError,
+        match=rf"type_overrides\['float8'\]={re.escape(repr(expression))}: {message}",
+    ):
         test_project.generate_no_import(type_overrides={"float8": expression})
 
 

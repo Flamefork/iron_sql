@@ -4,6 +4,7 @@ from collections.abc import AsyncGenerator
 import pydantic
 import pytest
 
+from iron_sql.codegen import SQLGenerationError
 from tests.conftest import SCHEMA_SQL
 from tests.conftest import GeneratedTestDB
 from tests.conftest import ProjectBuilder
@@ -292,7 +293,13 @@ async def test_scalar_nullable_override_none() -> None:
 
 def test_invalid_config_key_without_dot(test_project: ProjectBuilder) -> None:
     test_project.add_query("q", "SELECT 1")
-    with pytest.raises(ValueError, match=r"must be 'table\.column'"):
+    with pytest.raises(
+        SQLGenerationError,
+        match=(
+            r"json_model_overrides\['users_metadata'\]: "
+            r"expected a 'table\.column' key"
+        ),
+    ):
         test_project.generate_no_import(
             json_model_overrides={
                 "users_metadata": "tests.json_models:UserMetadata",
@@ -302,7 +309,13 @@ def test_invalid_config_key_without_dot(test_project: ProjectBuilder) -> None:
 
 def test_invalid_config_value_without_colon(test_project: ProjectBuilder) -> None:
     test_project.add_query("q", "SELECT 1")
-    with pytest.raises(ValueError, match="must be 'module:Class'"):
+    with pytest.raises(
+        SQLGenerationError,
+        match=(
+            r"json_model_overrides\['users\.metadata'\]='tests\.json_models\."
+            r"UserMetadata': expected a 'module:Class' value"
+        ),
+    ):
         test_project.generate_no_import(
             json_model_overrides={
                 "users.metadata": "tests.json_models.UserMetadata",
@@ -312,7 +325,13 @@ def test_invalid_config_value_without_colon(test_project: ProjectBuilder) -> Non
 
 def test_invalid_config_nonexistent_table(test_project: ProjectBuilder) -> None:
     test_project.add_query("q", "SELECT 1")
-    with pytest.raises(ValueError, match="table 'no_such_table' not found"):
+    with pytest.raises(
+        SQLGenerationError,
+        match=(
+            r"json_model_overrides\['no_such_table\.col'\]: the schema has no "
+            r"table 'no_such_table'"
+        ),
+    ):
         test_project.generate_no_import(
             json_model_overrides={
                 "no_such_table.col": "tests.json_models:UserMetadata",
@@ -322,7 +341,13 @@ def test_invalid_config_nonexistent_table(test_project: ProjectBuilder) -> None:
 
 def test_invalid_config_nonexistent_column(test_project: ProjectBuilder) -> None:
     test_project.add_query("q", "SELECT 1")
-    with pytest.raises(ValueError, match="column 'no_col' not found in table 'users'"):
+    with pytest.raises(
+        SQLGenerationError,
+        match=(
+            r"json_model_overrides\['users\.no_col'\]: table 'users' has no "
+            r"column 'no_col'"
+        ),
+    ):
         test_project.generate_no_import(
             json_model_overrides={
                 "users.no_col": "tests.json_models:UserMetadata",
@@ -332,7 +357,14 @@ def test_invalid_config_nonexistent_column(test_project: ProjectBuilder) -> None
 
 def test_invalid_config_non_json_column(test_project: ProjectBuilder) -> None:
     test_project.add_query("q", "SELECT 1")
-    with pytest.raises(ValueError, match="has type 'bool'"):
+    with pytest.raises(
+        SQLGenerationError,
+        match=(
+            r"json_model_overrides\['users\.is_active'\]: column users\.is_active "
+            r"has type 'bool'; a JSON model override needs a column of type json, "
+            r"jsonb, text, varchar"
+        ),
+    ):
         test_project.generate_no_import(
             json_model_overrides={
                 "users.is_active": "tests.json_models:UserMetadata",

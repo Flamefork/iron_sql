@@ -13,6 +13,8 @@ import pydantic
 import sqlc
 from pydantic import ConfigDict
 
+from iron_sql.codegen.errors import SQLGenerationError
+
 
 class CatalogReference(pydantic.BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -129,14 +131,21 @@ class Catalog(pydantic.BaseModel):
     schemas: tuple[Schema, ...]
 
     def schema_by_name(self, name: str) -> Schema:
+        # The generator rejects query types from undeclared schemas before any lookup.
         missing_schema_msg = f"Schema not found: {name}"
         for schema in self.schemas:
             if schema.name == name:
                 return schema
         raise AssertionError(missing_schema_msg)
 
+    def schema_name_of(self, ref: CatalogReference) -> str:
+        return ref.schema_name or self.default_schema
+
+    def has_schema(self, name: str) -> bool:
+        return any(schema.name == name for schema in self.schemas)
+
     def schema_by_ref(self, ref: CatalogReference) -> Schema:
-        return self.schema_by_name(ref.schema_name or self.default_schema)
+        return self.schema_by_name(self.schema_name_of(ref))
 
 
 class QueryParameter(pydantic.BaseModel):
@@ -165,7 +174,7 @@ class SQLCResult(pydantic.BaseModel):
 
     def used_tables(self) -> tuple[Table, ...]:
         used = {
-            (c.table.schema_name or self.catalog.default_schema, c.table.name)
+            (self.catalog.schema_name_of(c.table), c.table.name)
             for q in self.queries
             for c in q.columns
             if c.table is not None
@@ -187,8 +196,11 @@ def run_sqlc(
     tempdir_path: Path | None = None,
 ) -> tuple[SQLCResult, list[tuple[int, str]]]:
     if not schema_path.exists():
-        msg = f"Schema file not found: {schema_path}"
-        raise ValueError(msg)
+        msg = (
+            f"schema_path: schema file not found: {schema_path}; "
+            "schema_path is resolved against src_path"
+        )
+        raise SQLGenerationError(msg)
 
     if not queries:
         return SQLCResult(

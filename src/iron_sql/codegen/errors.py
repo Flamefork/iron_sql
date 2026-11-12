@@ -1,0 +1,2 @@
+class SQLGenerationError(ValueError):
+    pass

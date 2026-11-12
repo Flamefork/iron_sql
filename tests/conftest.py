@@ -430,7 +430,9 @@ class ProjectBuilder:
     async def extend_schema(self, sql_str: LiteralString) -> None:
         with (self.src_path / "schema.sql").open("a", encoding="utf-8") as f:
             f.write("\n" + sql_str)
+        await self.execute_in_database(sql_str)
 
+    async def execute_in_database(self, sql_str: LiteralString) -> None:
         async with (
             await psycopg.AsyncConnection.connect(self.dsn, autocommit=True) as conn,
             conn.cursor() as cur,

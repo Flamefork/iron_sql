@@ -17,6 +17,7 @@ from collections.abc import Callable
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 from typing import cast
 from typing import override
 
@@ -24,6 +25,7 @@ import inflection
 from psycopg.sql import Identifier
 from pydantic import alias_generators
 
+from iron_sql.codegen.errors import SQLGenerationError
 from iron_sql.codegen.sqlc import Catalog
 from iron_sql.codegen.sqlc import Column
 from iron_sql.codegen.sqlc import Enum
@@ -99,13 +101,7 @@ class ParamSpec:
     is_named: bool
     db_type: str
     not_null: bool
-    is_array: bool
     json_model: JSONModelRef | None = None
-
-    def __post_init__(self) -> None:
-        if self.db_type == "jsonb" and self.is_array:
-            msg = "Unsupported column type: jsonb[]"
-            raise TypeError(msg)
 
     @property
     def serialized_expr(self) -> str:
@@ -133,12 +129,9 @@ class UnknownSQLTypeWarning(UserWarning):
     pass
 
 
-class SQLGenerationError(ValueError):
-    pass
-
-
 @dataclass(kw_only=True, frozen=True)
 class ModuleExprRef:
+    setting: str
     module_name: str
     module_expr: str
     import_names: tuple[str, ...]
@@ -146,15 +139,18 @@ class ModuleExprRef:
     source_spellings: tuple[str, ...]
 
     @classmethod
-    def parse(cls, value: str) -> "ModuleExprRef":
+    def parse(cls, setting: str, value: str) -> "ModuleExprRef":
         module_name, sep, module_expr = value.partition(":")
         if not sep:
-            msg = f"module expression must be 'module:expr', got: {value!r}"
-            raise ValueError(msg)
+            msg = (
+                f"{setting}={value!r}: expected 'module:expr', a dotted module path "
+                "and a Python expression evaluated in that module"
+            )
+            raise SQLGenerationError(msg)
         issues = dotted_path_name_issues(
-            "module expression module path",
+            f"{setting} module path",
             module_name,
-            f"module expression {value!r}",
+            f"{setting}={value!r}",
             (),
         )
         raise_generated_name_issues(issues)
@@ -168,8 +164,12 @@ class ModuleExprRef:
                 "exec",
             )
         except SyntaxError as exc:
-            msg = f"invalid module expression {module_expr!r}: {exc.msg}"
-            raise ValueError(msg) from exc
+            msg = (
+                f"{setting}={value!r}: expression {module_expr!r} is not valid "
+                f"Python: {exc.msg}; expected 'module:expr' with a single "
+                "expression after the colon"
+            )
+            raise SQLGenerationError(msg) from exc
         module_binding_spellings = tuple(
             dict.fromkeys(module_expression_binding_spellings(parsed, module_expr))
         )
@@ -184,7 +184,7 @@ class ModuleExprRef:
                 if name != "_iron_sql_value" and name not in module_binding_names
             )
         )
-        module = importlib.import_module(module_name)
+        module = _import_setting_module(setting, value, module_name)
         module_imports = tuple(name for name in external_reads if name in vars(module))
         source_spellings = tuple(
             dict.fromkeys((
@@ -193,6 +193,7 @@ class ModuleExprRef:
             ))
         )
         return cls(
+            setting=setting,
             module_name=module_name,
             module_expr=module_expr,
             import_names=module_imports,
@@ -200,17 +201,33 @@ class ModuleExprRef:
             source_spellings=source_spellings,
         )
 
+    @property
+    def value(self) -> str:
+        return f"{self.module_name}:{self.module_expr}"
+
     def evaluate[T](self, *, expected_type: type[T]) -> T:
-        mod = importlib.import_module(self.module_name)
-        value = cast("object", eval(self.module_expr, vars(mod)))  # noqa: S307
+        mod = _import_setting_module(self.setting, self.value, self.module_name)
+        try:
+            value = cast("object", eval(self.module_expr, vars(mod)))  # noqa: S307
+        except Exception as exc:
+            exc.add_note(f"while evaluating {self.setting}={self.value!r}")
+            raise
+        # The message names only the type: the value of dsn_expr carries credentials.
         if not isinstance(value, expected_type):
             msg = (
-                f"module expression {self.module_name}:{self.module_expr} "
-                f"must evaluate to "
-                f"{expected_type.__name__}, got: {type(value).__name__}"
+                f"{self.setting}={self.value!r}: the expression must evaluate to "
+                f"{expected_type.__name__}, got {type(value).__name__}"
             )
-            raise TypeError(msg)
+            raise SQLGenerationError(msg)
         return value
+
+
+def _import_setting_module(setting: str, value: str, module_name: str) -> ModuleType:
+    try:
+        return importlib.import_module(module_name)
+    except Exception as exc:
+        exc.add_note(f"while importing module {module_name!r} of {setting}={value!r}")
+        raise
 
 
 _SQL_TYPE_MAP: dict[str, str] = {
@@ -286,7 +303,6 @@ class TypeResolver:
             is_named=is_named,
             db_type=db_type,
             not_null=column.not_null,
-            is_array=column.is_array,
             json_model=json_model,
         )
 
@@ -362,10 +378,11 @@ def validate_type_overrides(overrides: dict[str, str], sqlc_res: SQLCResult) -> 
     unused = sorted(set(overrides) - used_types)
     if unused:
         msg = (
-            f"type_overrides: no query column or parameter has type "
-            f"{', '.join(unused)}; types in use: {', '.join(sorted(used_types))}"
+            f"type_overrides keys {', '.join(map(repr, unused))}: no query column "
+            "or parameter has this type; remove the keys or use a type in use: "
+            f"{', '.join(sorted(used_types))}"
         )
-        raise ValueError(msg)
+        raise SQLGenerationError(msg)
 
 
 class BuiltinNameQualifier(ast.NodeTransformer):
@@ -383,12 +400,16 @@ class BuiltinNameQualifier(ast.NodeTransformer):
         return node
 
 
-def normalize_type_override_expression(expression: str) -> str:
+def normalize_type_override_expression(db_type: str, expression: str) -> str:
+    setting = f"type_overrides[{db_type!r}]={expression!r}"
     try:
         parsed = ast.parse(expression, mode="eval")
     except SyntaxError as exc:
-        msg = f"invalid type_overrides expression {expression!r}: {exc.msg}"
-        raise ValueError(msg) from exc
+        msg = (
+            f"{setting}: not a valid Python expression: {exc.msg}; expected a type "
+            "annotation such as 'decimal.Decimal'"
+        )
+        raise SQLGenerationError(msg) from exc
     normalized = cast("ast.Expression", BuiltinNameQualifier().visit(parsed))
     ast.fix_missing_locations(normalized)
     roots = {
@@ -400,10 +421,11 @@ def normalize_type_override_expression(expression: str) -> str:
     unavailable = sorted(roots - available)
     if unavailable:
         msg = (
-            f"type_overrides expression {expression!r} reads unavailable generated "
-            f"module bindings: {', '.join(unavailable)}"
+            f"{setting}: the generated module does not bind "
+            f"{', '.join(unavailable)}; use Python builtins and names it binds: "
+            f"{', '.join(sorted(available))}"
         )
-        raise ValueError(msg)
+        raise SQLGenerationError(msg)
     return ast.unparse(normalized)
 
 
@@ -457,6 +479,60 @@ def query_source_parameter_issues(
         if len(nullability) > 1
     )
     return issues
+
+
+def _raise_undeclared_type_schema_issues(
+    sqlc_res: SQLCResult, query_locations_by_name: dict[str, list[str]]
+) -> None:
+    # sqlc infers query types from the live database but builds the catalog from
+    # schema_path, so a type may name a schema the catalog has never seen.
+    catalog = sqlc_res.catalog
+    issues = [
+        (
+            f"{', '.join(query_locations_by_name[query.name])}: {position} has type "
+            f"{schema_name}.{column.type.name} from schema {schema_name!r}"
+        )
+        for query in sqlc_res.queries
+        for position, column in (
+            *((f"result column {c.name!r}", c) for c in query.columns),
+            *(
+                (f"parameter {p.column.name or f'param_{p.number}'!r}", p.column)
+                for p in query.params
+            ),
+        )
+        for schema_name in (catalog.schema_name_of(column.type),)
+        if not catalog.has_schema(schema_name)
+    ]
+    if not issues:
+        return
+    details = "\n".join(f"- {issue}" for issue in issues)
+    msg = (
+        "Query types come from schemas that schema_path does not declare:\n"
+        f"{details}\n"
+        "sqlc infers query types from the database at dsn but looks them up in "
+        "schema_path; declare these schemas and their types in schema_path"
+    )
+    raise SQLGenerationError(msg)
+
+
+def _raise_jsonb_array_param_issues(
+    sqlc_res: SQLCResult, query_locations_by_name: dict[str, list[str]]
+) -> None:
+    issues = [
+        (
+            f"{', '.join(query_locations_by_name[query.name])}: parameter "
+            f"{param.column.name or f'param_{param.number}'!r} has type jsonb[]"
+        )
+        for query in sqlc_res.queries
+        for param in query.params
+        if param.column.is_array
+        and canonical_type_name(param.column, sqlc_res.catalog) == "jsonb"
+    ]
+    if not issues:
+        return
+    details = "\n".join(f"- {issue}" for issue in issues)
+    msg = f"iron_sql does not support jsonb[] query parameters:\n{details}"
+    raise SQLGenerationError(msg)
 
 
 def raise_query_parameter_issues(issues: list[str]) -> None:
@@ -538,10 +614,10 @@ def render_sql_module(  # noqa: PLR0913, PLR0914
     if debug_path is not None:
         write_skipped_dirs(debug_path, discovered.skipped)
 
-    dsn_ref = ModuleExprRef.parse(dsn_expr)
+    dsn_ref = ModuleExprRef.parse("dsn_expr", dsn_expr)
     dsn = dsn_ref.evaluate(expected_type=str)
     pool_options_ref = (
-        ModuleExprRef.parse(pool_options_expr)
+        ModuleExprRef.parse("pool_options_expr", pool_options_expr)
         if pool_options_expr is not None
         else None
     )
@@ -574,11 +650,14 @@ def render_sql_module(  # noqa: PLR0913, PLR0914
             query_locations_by_name,
             {q.name: operator_hints(q.sql) for q in queries},
         )
-        msg = f"Error running SQLC:\n{mapped}"
+        msg = f"sqlc exited with errors:\n{mapped}"
         raise SQLGenerationError(msg)
 
+    _raise_undeclared_type_schema_issues(sqlc_res, query_locations_by_name)
+    _raise_jsonb_array_param_issues(sqlc_res, query_locations_by_name)
+
     normalized_type_overrides = {
-        db_type: normalize_type_override_expression(expression)
+        db_type: normalize_type_override_expression(db_type, expression)
         for db_type, expression in (type_overrides or {}).items()
     }
     validate_type_overrides(normalized_type_overrides, sqlc_res)
@@ -600,6 +679,7 @@ def render_sql_module(  # noqa: PLR0913, PLR0914
         sqlc_res.queries,
         sqlc_res.used_tables(),
         queries,
+        query_locations_by_name,
         resolver,
     )
 
@@ -770,37 +850,40 @@ def resolve_json_model_overrides(
 
     parsed: dict[tuple[str, str], tuple[str, str, str]] = {}
     for key, import_path in overrides.items():
+        setting = f"json_model_overrides[{key!r}]"
         table_name, sep, col_name = key.partition(".")
         if not sep:
-            msg = f"json_model_overrides key must be 'table.column', got: {key!r}"
-            raise ValueError(msg)
+            msg = f"{setting}: expected a 'table.column' key"
+            raise SQLGenerationError(msg)
         if table_name not in tables:
-            msg = f"json_model_overrides: table {table_name!r} not found in catalog"
-            raise ValueError(msg)
+            msg = (
+                f"{setting}: the schema has no table {table_name!r}; the key must "
+                "name a table.column of the schema"
+            )
+            raise SQLGenerationError(msg)
         if (table_name, col_name) not in col_types:
             msg = (
-                f"json_model_overrides: column {col_name!r} "
-                f"not found in table {table_name!r}"
+                f"{setting}: table {table_name!r} has no column {col_name!r}; the "
+                "key must name a table.column of the schema"
             )
-            raise ValueError(msg)
+            raise SQLGenerationError(msg)
 
         db_type = col_types[table_name, col_name]
         if db_type not in json_compatible_types:
             msg = (
-                f"json_model_overrides: column "
-                f"{table_name}.{col_name} has type "
-                f"{db_type!r}, expected one of "
-                f"{json_compatible_types}"
+                f"{setting}: column {table_name}.{col_name} has type {db_type!r}; "
+                "a JSON model override needs a column of type "
+                f"{', '.join(sorted(json_compatible_types))}"
             )
-            raise ValueError(msg)
+            raise SQLGenerationError(msg)
 
         module_path, sep, class_name = import_path.partition(":")
         if not sep:
             msg = (
-                "json_model_overrides value must be "
-                f"'module:Class', got: {import_path!r}"
+                f"{setting}={import_path!r}: expected a 'module:Class' value, a "
+                "dotted module path and the model class in it"
             )
-            raise ValueError(msg)
+            raise SQLGenerationError(msg)
 
         origin = f"json_model_overrides[{key!r}] = {import_path!r}"
         parsed[table_name, col_name] = (module_path, class_name, origin)
@@ -1171,8 +1254,12 @@ def raise_generated_name_issues(issues: list[tuple[str, str, str]]) -> None:
     if not issues:
         return
     details = "\n".join(f"- {message}" for _, _, message in sorted(issues))
-    msg = f"Invalid generated Python names:\n{details}"
-    raise ValueError(msg)
+    msg = (
+        f"Invalid generated Python names:\n{details}\n"
+        "Rename the listed origins so that each generated name is a distinct "
+        "Python identifier, unchanged by NFKC normalization and name mangling"
+    )
+    raise SQLGenerationError(msg)
 
 
 def module_binding_claims(
@@ -2248,6 +2335,7 @@ def build_entities(
     queries_from_sqlc: tuple[Query, ...],
     used_tables: tuple[Table, ...],
     queries_from_code: list[CodeQuery],
+    query_locations_by_name: dict[str, list[str]],
     resolver: TypeResolver,
 ) -> tuple[list[SQLEntity], dict[str, str]]:
     row_types = {q.name: q.row_type for q in queries_from_code}
@@ -2264,12 +2352,16 @@ def build_entities(
     specs_to_entities = {e.column_specs: e for e in table_entities}
 
     for q in queries_from_sqlc:
-        if row_types[q.name] and not q.columns:
-            msg = f"Query has row_type={row_types[q.name]} but no result"
-            raise ValueError(msg)
-        if row_types[q.name] and len(q.columns) == 1:
-            msg = f"Query has row_type={row_types[q.name]} but only one column"
-            raise ValueError(msg)
+        row_type = row_types[q.name]
+        if not row_type or len(q.columns) > 1:
+            continue
+        returns = "no result columns" if not q.columns else "one result column"
+        msg = (
+            f"{', '.join(query_locations_by_name[q.name])}: row_type={row_type!r} "
+            f"names a result class, but the query returns {returns}; "
+            "row_type needs two or more result columns, remove it"
+        )
+        raise SQLGenerationError(msg)
 
     query_result_entities = {
         q.name: SQLEntity(
@@ -2359,21 +2451,26 @@ def walk_scanned_tree(src_path: Path) -> ScannedTree:
 
 
 def find_fn_calls(
-    files: tuple[Path, ...], fn_name: str
-) -> Iterator[tuple[Path, int, ast.Call]]:
+    src_path: Path, files: tuple[Path, ...], fn_name: str
+) -> Iterator[tuple[Path, ast.Call]]:
     for path in files:
         content = path.read_text(encoding="utf-8")
         if fn_name not in content:
             continue
+        relative_path = path.relative_to(src_path)
         try:
             tree = ast.parse(content, filename=str(path))
         except SyntaxError as exc:
-            msg = f"Failed to parse {path}: {exc.msg} (line {exc.lineno})"
-            raise SyntaxError(msg) from exc
+            msg = (
+                f"{relative_path}:{exc.lineno}:{exc.offset}: Python syntax error: "
+                f"{exc.msg}; the scanner parses every file that mentions "
+                f"{fn_name}, fix the syntax"
+            )
+            raise SQLGenerationError(msg) from exc
         for node in ast.walk(tree):
             match node:
                 case ast.Call(func=ast.Name(id=id)) if id == fn_name:
-                    yield path, node.lineno, node
+                    yield relative_path, node
                 case _:
                     pass
 
@@ -2381,58 +2478,46 @@ def find_fn_calls(
 def find_all_queries(
     src_path: Path, files: tuple[Path, ...], sql_fn_name: str
 ) -> Iterator[CodeQuery]:
-    for file, lineno, node in find_fn_calls(files, sql_fn_name):
-        relative_path = file.relative_to(src_path)
-
-        if len(node.args) != 1:
-            msg = (
-                f"Invalid positional arguments for {sql_fn_name} "
-                f"at {relative_path}:{lineno}, "
-                "expected a single string literal"
-            )
-            raise TypeError(msg)
-        sql_arg = node.args[0]
+    call_form = (
+        f"expected {sql_fn_name}(<SQL string literal>) with an optional "
+        "row_type=<string literal>"
+    )
+    for relative_path, node in find_fn_calls(src_path, files, sql_fn_name):
+        location = f"{relative_path}:{node.lineno}:{node.col_offset + 1}"
+        sql_arg = node.args[0] if len(node.args) == 1 else None
         if not isinstance(sql_arg, ast.Constant) or not isinstance(sql_arg.value, str):
             msg = (
-                f"Invalid positional arguments for {sql_fn_name} "
-                f"at {relative_path}:{lineno}, "
-                "expected a single string literal"
+                f"{location}: the SQL argument must be a single positional string "
+                f"literal; {call_form}"
             )
-            raise TypeError(msg)
+            raise SQLGenerationError(msg)
 
         sql = sql_arg.value
 
         row_type = None
         if len(node.keywords) > 1:
-            msg = (
-                f"Invalid keyword arguments for {sql_fn_name} "
-                f"at {relative_path}:{lineno}, "
-                "expected at most one row_type string literal"
-            )
-            raise TypeError(msg)
+            msg = f"{location}: more than one keyword argument; {call_form}"
+            raise SQLGenerationError(msg)
         for kw in node.keywords:
             if kw.arg != "row_type":
                 argument_name = "**kwargs" if kw.arg is None else repr(kw.arg)
                 msg = (
-                    f"Invalid keyword argument {argument_name} for {sql_fn_name} "
-                    f"at {relative_path}:{lineno}, expected row_type"
+                    f"{location}: unsupported keyword argument {argument_name}; "
+                    f"{call_form}"
                 )
-                raise TypeError(msg)
+                raise SQLGenerationError(msg)
             if not isinstance(kw.value, ast.Constant) or not isinstance(
                 kw.value.value, str
             ):
-                msg = (
-                    f"Invalid keyword argument {kw.arg} for {sql_fn_name} "
-                    f"at {relative_path}:{lineno}, expected a string literal"
-                )
-                raise TypeError(msg)
+                msg = f"{location}: row_type must be a string literal; {call_form}"
+                raise SQLGenerationError(msg)
             row_type = kw.value.value
 
         yield CodeQuery(
             sql=sql,
             row_type=row_type,
             file=relative_path,
-            lineno=lineno,
+            lineno=node.lineno,
         )
 
 
@@ -2443,9 +2528,10 @@ def validate_sql_has_single_row_type(queries: list[CodeQuery]) -> None:
             first = first_by_sql[query.sql]
             if query.row_type != first.row_type:
                 msg = (
-                    f"row_type conflict: {first.location} has {first.row_type!r},"
-                    f" {query.location} has {query.row_type!r}"
+                    f"row_type conflict for the same SQL: {first.location} has "
+                    f"{first.row_type!r}, {query.location} has {query.row_type!r}; "
+                    "pass the same row_type at every call site of this SQL"
                 )
-                raise ValueError(msg)
+                raise SQLGenerationError(msg)
         else:
             first_by_sql[query.sql] = query
