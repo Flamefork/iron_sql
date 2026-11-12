@@ -109,12 +109,7 @@ async def notify(
     conn: psycopg.AsyncConnection[Any], channel: str, payload: str
 ) -> None:
     _validate_channel(channel)
-    await conn.execute(
-        psycopg.sql.SQL("NOTIFY {}, {}").format(
-            psycopg.sql.Identifier(channel),
-            psycopg.sql.Literal(payload),
-        )
-    )
+    await conn.execute("SELECT pg_notify(%s, %s)", (channel, payload))
 
 
 async def execute_listen(conn: psycopg.AsyncConnection[Any], channel: str) -> None:
@@ -332,6 +327,10 @@ class PoolOptions(TypedDict, total=False):
     reconnect_failed: Callable[[psycopg_pool.AsyncConnectionPool[Any]], Awaitable[None]]
 
 
+# Pool-level registration is the only enum mechanism: coercion in the row factory
+# missed enums inside class_row fields and arrays. The mapping goes by member value,
+# since register_enum's default maps PG labels by member name. A type missing from
+# the database surfaces as PoolTimeout: the pool retries the failing configure.
 async def register_enums(
     conn: psycopg.AsyncConnection[Any],
     enum_types: Sequence[tuple[str, type[StrEnum]]],

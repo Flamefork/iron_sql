@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import AsyncGenerator
+from typing import cast
 
 import psycopg
 import pytest
@@ -216,6 +217,52 @@ async def test_notify_empty_channel_raises(pool: ConnectionPool) -> None:
     async with pool.connection() as conn:
         with pytest.raises(ValueError, match="must not be empty"):
             await notify(conn, "", "payload")
+
+
+async def test_notify_keeps_values_out_of_query_text(
+    pool: ConnectionPool, pg_dsn: str
+) -> None:
+    channel = "test_secret_channel_name"
+    payload = "secret_payload_value"
+    async with pool.connection() as conn, conn.transaction():
+        await notify(conn, channel, payload)
+        async with await psycopg.AsyncConnection.connect(
+            pg_dsn, autocommit=True
+        ) as observer:
+            cur = await observer.execute(
+                "SELECT query FROM pg_stat_activity WHERE pid = %s",
+                (conn.pgconn.backend_pid,),
+            )
+            row = await cur.fetchone()
+
+    assert row is not None
+    query = cast("str", row[0])
+    assert "pg_notify" in query
+    assert payload not in query
+    assert channel not in query
+
+
+@pytest.mark.parametrize("channel", ["a" * 64, "é" * 32], ids=["ascii", "multibyte"])
+async def test_notify_channel_over_63_bytes_raises(
+    pool: ConnectionPool, channel: str
+) -> None:
+    async with pool.connection() as conn:
+        with pytest.raises(psycopg.errors.InvalidParameterValue):
+            await notify(conn, channel, "payload")
+
+
+@pytest.mark.parametrize(
+    "channel", ["a" * 63, "é" * 31 + "a"], ids=["ascii", "multibyte"]
+)
+async def test_notify_channel_of_63_bytes_is_delivered(
+    pool: ConnectionPool, channel: str
+) -> None:
+    async with pool.connection() as conn, listen(conn, channel) as payloads:
+        await notify(conn, channel, "hello")
+        async with asyncio.timeout(5):
+            async for value in payloads:
+                assert value == "hello"
+                break
 
 
 # =============================================================================
